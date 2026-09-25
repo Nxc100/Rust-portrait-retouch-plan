@@ -1,0 +1,15 @@
+/target
+/models/*.onnx
+/runtime/*.dll
+/runtime/*.so
+/runtime/*.dylib
+/example/
+/out/
+/tests/golden/
+/tests/samples/
+*.log
+__pycache__/
+/models/abpn_weights/
+/.venv*/
+# 用户提供的样张与像素蛋糕导出图（真实人物照片，不入库）
+/test/

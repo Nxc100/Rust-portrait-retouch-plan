@@ -1,0 +1,13 @@
+# crates.io 在当前网络环境不可达（schannel 握手失败），使用 rsproxy.cn 稀疏镜像。
+# 如网络正常可删除本文件或注释掉 [source.*] 段。
+[source.crates-io]
+replace-with = "rsproxy-sparse"
+
+[source.rsproxy-sparse]
+registry = "sparse+https://rsproxy.cn/index/"
+
+[net]
+git-fetch-with-cli = true
+
+[http]
+check-revoke = false

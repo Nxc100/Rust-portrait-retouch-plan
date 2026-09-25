@@ -1,0 +1,41 @@
+{
+  "luts": [
+    {
+      "name": "原图",
+      "file": "identity_512.png",
+      "kind": "lookup512",
+      "default_intensity": 0.0
+    },
+    {
+      "name": "暖调",
+      "file": "warm.cube",
+      "kind": "cube",
+      "default_intensity": 0.8
+    },
+    {
+      "name": "冷调",
+      "file": "cool.cube",
+      "kind": "cube",
+      "default_intensity": 0.8
+    },
+    {
+      "name": "褪色",
+      "file": "fade.cube",
+      "kind": "cube",
+      "default_intensity": 0.8
+    },
+    {
+      "name": "黑白",
+      "file": "mono.cube",
+      "kind": "cube",
+      "default_intensity": 1.0
+    }
+  ],
+  "whiten": [
+    {
+      "name": "柔和美白",
+      "file": "whiten_soft.png",
+      "kind": "lookup512"
+    }
+  ]
+}

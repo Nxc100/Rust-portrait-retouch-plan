@@ -1,0 +1,51 @@
+[package]
+name = "portrait-retouch"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+description = "Pure-Rust portrait retouching: skin smoothing, whitening, thin-face / big-eye / thin-nose warps and LUT style filters (CPU + rayon, ONNX landmarks via ort)"
+readme = "README.md"
+publish = false
+
+[lib]
+name = "portrait_retouch"
+path = "src/lib.rs"
+
+[[bin]]
+name = "retouch"
+path = "src/bin/retouch.rs"
+
+[dependencies]
+image = "0.25"
+rayon = "1"
+ndarray = "0.17"
+ort = { version = "2.0.0-rc.13", default-features = false, features = ["std", "load-dynamic", "ndarray"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+clap = { version = "4", features = ["derive"] }
+jpeg-encoder = "0.7.1"
+
+[dev-dependencies]
+criterion = "0.8"
+
+[features]
+default = []
+# P7（可选）：wgpu 版双边/组合/LUT/形变。当前为占位，尚未实现。
+gpu = []
+
+[[bench]]
+name = "retouch"
+harness = false
+
+[profile.release]
+opt-level = 3
+debug = 1
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
