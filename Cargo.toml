@@ -12,6 +12,13 @@ publish = false
 name = "portrait_retouch"
 path = "src/lib.rs"
 
+# 工作区：库 + 命令行（本包）与 Tauri 图形界面（gui/src-tauri）。
+# default-members 只含本包：在根目录执行 cargo build / test / clippy 的行为与之前完全相同；
+# 图形界面用 `cargo run --release -p portrait-retouch-gui` 构建运行。
+[workspace]
+members = [".", "gui/src-tauri"]
+default-members = ["."]
+
 [[bin]]
 name = "retouch"
 path = "src/bin/retouch.rs"

@@ -251,6 +251,26 @@ impl Engine {
     pub fn config(&self) -> &EngineConfig {
         &self.cfg
     }
+    /// 已加载模型的简短标签：关键点模型名，以及 `+parsing` / `+matting` / `+genderage` / `+ai-blemish` /
+    /// `+skinseg(<文件>)`（命令行横幅、界面状态栏共用）。
+    pub fn model_tags(&self) -> Vec<String> {
+        let mut tags = vec![self.landmark_name().to_string()];
+        for (on, tag) in [
+            (self.has_parsing(), "+parsing"),
+            (self.has_matting(), "+matting"),
+            (self.has_attribute(), "+genderage"),
+            (self.has_ai_blemish(), "+ai-blemish"),
+        ] {
+            if on {
+                tags.push(tag.to_string());
+            }
+        }
+        if let Some(n) = self.skin_seg_name() {
+            tags.push(format!("+skinseg({n})"));
+        }
+        tags
+    }
+
     pub fn landmark_name(&self) -> &'static str {
         self.landmark_name
     }

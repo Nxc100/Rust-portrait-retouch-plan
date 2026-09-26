@@ -89,6 +89,19 @@ impl Default for Preset {
 }
 
 impl Preset {
+    /// 内置预设的规范名（[`Preset::load_named`] 可识别）。
+    pub fn builtin_names() -> &'static [&'static str] {
+        &["cream_skin"]
+    }
+
+    /// 按名字取预设：内置名（`cream` / `cream_skin` / `creamskin` / `奶油肌`，不区分大小写）或 JSON 文件路径。
+    pub fn load_named(name: &str) -> anyhow::Result<Self> {
+        match name.to_ascii_lowercase().as_str() {
+            "cream" | "cream_skin" | "creamskin" | "奶油肌" => Ok(Self::cream_skin()),
+            _ => Self::load(Path::new(name)),
+        }
+    }
+
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let text = std::fs::read_to_string(path)?;
         let mut p: Preset =

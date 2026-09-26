@@ -1,0 +1,30 @@
+[package]
+name = "portrait-retouch-gui"
+version = "0.6.0"
+description = "portrait-retouch 的手动测试界面（Tauri 2）"
+edition = "2021"
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+publish = false
+
+[lib]
+name = "portrait_retouch_gui"
+path = "src/lib.rs"
+
+[[bin]]
+name = "portrait-retouch-gui"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+portrait-retouch = { path = "../.." }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+tauri-plugin-opener = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+anyhow = "1"
+thiserror = "2"
+image = "0.25"

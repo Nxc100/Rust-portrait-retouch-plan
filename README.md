@@ -18,8 +18,9 @@
 ## 目录
 
 ```
-src/            库：buffer / geom / color / skin / face / warp / pipeline / engine / photo / batch / debug / ui_map
+src/            库：buffer / geom / color / skin / face / warp / pipeline / engine / options / photo / batch / debug / ui_map
 src/bin/        retouch 命令行
+gui/            图形界面（Tauri 2，工作区成员 portrait-retouch-gui）：手动测试各项功能，见 gui/README.md
 models/         ONNX 模型（不入库，scripts/fetch_models.py）
 runtime/        onnxruntime 动态库（不入库，scripts/fetch_onnxruntime.py）
 luts/           恒等 / 示例 LUT 与 index.json（tools/make_luts.py 生成）
@@ -90,6 +91,17 @@ ONNX Runtime 动态库查找顺序：`--ort-dylib` → `ORT_DYLIB_PATH` → `./r
 - **JPEG 输出**：jpeg-encoder，4:4:4，标准霍夫曼表，`--jpeg-quality` 默认 98（与像素蛋糕导出的量化表一致），
   写回原图的 ICC 与 EXIF（不写 XMP）。
 
+## 图形界面
+
+```bash
+cargo run --release -p portrait-retouch-gui
+```
+
+手动测试用的桌面界面（[gui/README.md](gui/README.md)）：打开照片后拖滑块实时看效果（缩小的工作分辨率上处理，
+保存时按原图重做），对比 / 并排 / 按住空格看原图，查看关键点、皮肤遮罩、人像抠图、皮肤概率、AI 修复区等中间结果；
+批量处理（进度、取消、报告）；引擎设置（模型目录、关键点模型、可选模型开关）。参数与命令行选项一一对应
+（共用库的 `ParamOptions`），保存结果与命令行输出逐字节相同。根目录的 `cargo build / test` 不包含界面。
+
 ## 库 API
 
 ```rust
@@ -106,7 +118,10 @@ let out = engine.retouch(&img, &faces, &params);        // 纯函数；内部按
 let photo = portrait_retouch::Photo::load("photo.jpg".as_ref())?;
 portrait_retouch::photo::save(&out, "out.jpg".as_ref(), 98, &photo.meta)?;
 
-// 批量：列出任务 → 执行（进度回调）→ 报告
+// 用户参数 → RetouchParams（命令行与图形界面共用；字段即 `retouch apply` 的选项）
+let params = portrait_retouch::ParamOptions { preset: Some("cream".into()), ..Default::default() }.build()?;
+
+// 批量：列出任务 → 执行（进度回调；BatchConfig::cancel 可随时取消）→ 报告
 use portrait_retouch::batch::{self, BatchConfig};
 let params = portrait_retouch::Preset::cream_skin().to_params()?;
 let cfg = BatchConfig::new(vec!["photos".into()], "retouched".into());
@@ -124,7 +139,8 @@ report.write(&cfg.output_dir)?;                         // batch_report.csv / .j
 ## 验证
 
 ```bash
-cargo test                                   # 70 单元 + 10 恒等性测试
+cargo test                                   # 75 单元 + 10 恒等性测试（只含库与命令行）
+cargo test -p portrait-retouch-gui           # 图形界面后端 19 个单元测试；界面冒烟测试见 gui/README.md
 PORTRAIT_SAMPLES=tests/samples cargo test --release --test golden   # 视觉回归（样张目录不入库；UPDATE_GOLDEN=1 更新）
 cargo bench --bench retouch                  # 12MP / 1280 预览基准
 python tools/oracle_numpy.py in.png out.png  # 与 numpy 直译公式逐像素对照（≤ 2/255）

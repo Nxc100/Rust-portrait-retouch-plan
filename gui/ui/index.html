@@ -1,0 +1,201 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>人像修图测试台</title>
+    <link rel="stylesheet" href="styles.css" />
+    <script type="module" src="js/main.js"></script>
+  </head>
+  <body class="tab-single">
+    <header class="appbar">
+      <div class="brand">
+        <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
+          <rect x="1" y="1" width="30" height="30" rx="8" fill="var(--accent)" />
+          <circle cx="16" cy="13" r="5.2" fill="#fff8f1" />
+          <path d="M6.5 27c1.6-5.2 5.3-8 9.5-8s7.9 2.8 9.5 8" fill="#fff8f1" />
+          <path d="M24.5 5.2l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9z" fill="#fff8f1" />
+        </svg>
+        <span class="brand-name">人像修图 · 手动测试台</span>
+        <span id="app-version" class="muted small"></span>
+      </div>
+      <nav class="tabs" role="tablist">
+        <button class="tab active" data-tab="single" role="tab">单张调试</button>
+        <button class="tab" data-tab="batch" role="tab">批量处理</button>
+        <button class="tab" data-tab="engine" role="tab">引擎设置</button>
+      </nav>
+      <div class="appbar-right">
+        <button id="batch-indicator" class="badge badge-busy" hidden>批处理进行中</button>
+        <button id="engine-badge" class="badge badge-idle">模型未加载</button>
+      </div>
+    </header>
+
+    <main>
+      <!-- 单张调试 -->
+      <section id="tab-single" class="tab-page single-page">
+        <aside class="sidebar">
+          <div id="photo-card" class="card photo-card"></div>
+          <div id="params" class="params"></div>
+        </aside>
+        <div class="workspace">
+          <div class="toolbar">
+            <div class="tool-group">
+              <button id="btn-open" class="btn needs-idle" title="Ctrl+O">打开照片…</button>
+              <button id="btn-save" class="btn needs-idle" title="Ctrl+S" disabled>保存结果…</button>
+            </div>
+            <div id="view-compare"></div>
+            <div id="view-debug"></div>
+            <div class="spacer"></div>
+            <div class="tool-group">
+              <label class="check" title="参数改变后自动处理"><input type="checkbox" id="chk-auto" /> 自动处理</label>
+              <button id="btn-process" class="btn btn-primary needs-idle" title="Ctrl+Enter" disabled>处理</button>
+            </div>
+          </div>
+          <div id="viewer"></div>
+          <div class="statusbar">
+            <span id="status-text" class="status-text"></span>
+            <span class="muted small hints" title="滚轮缩放 · 拖动平移 · 双击切换 100% / 适应 · F 适应 · 1 实际像素">滚轮缩放 · 拖动平移 · 按住空格看原图</span>
+            <div class="tool-group zoom">
+              <button id="btn-fit" class="btn btn-ghost btn-xs" title="适应窗口（F）">适应</button>
+              <button id="btn-100" class="btn btn-ghost btn-xs" title="实际像素（1）">100%</button>
+              <span id="zoom-label" class="muted small mono"></span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- 批量处理 -->
+      <section id="tab-batch" class="tab-page batch-page" hidden>
+        <aside class="sidebar batch-form">
+          <div class="card">
+            <h3>输入</h3>
+            <div class="btn-row">
+              <button id="batch-add-folder" class="btn btn-sm">添加目录…</button>
+              <button id="batch-add-files" class="btn btn-sm">添加照片…</button>
+              <button id="batch-clear" class="btn btn-ghost btn-sm">清空</button>
+            </div>
+            <ul id="batch-inputs" class="path-list"></ul>
+            <label class="check"><input type="checkbox" id="batch-recursive" /> 包含子目录（输出保留目录结构）</label>
+          </div>
+          <div class="card">
+            <h3>输出</h3>
+            <div class="file-row">
+              <span id="batch-output" class="file-path"></span>
+              <button id="batch-pick-output" class="btn btn-sm">选择…</button>
+              <button id="batch-open-output" class="btn btn-ghost btn-sm">打开</button>
+            </div>
+            <div class="field-grid">
+              <label for="batch-format">格式</label>
+              <select id="batch-format" class="input">
+                <option value="jpeg">JPEG（写回 ICC / EXIF）</option>
+                <option value="png">PNG（无损）</option>
+              </select>
+              <label for="batch-quality">JPEG 质量</label>
+              <div class="range-row">
+                <input type="range" id="batch-quality" min="60" max="100" step="1" />
+                <span id="batch-quality-value" class="mono small value-pill"></span>
+              </div>
+            </div>
+            <label class="check"><input type="checkbox" id="batch-overwrite" /> 覆盖已存在的输出（默认跳过，便于中断后续跑）</label>
+            <label class="check"><input type="checkbox" id="batch-landmarks" /> 同时导出人脸关键点 JSON（输出目录下 landmarks/）</label>
+          </div>
+          <div class="card">
+            <h3>修图参数</h3>
+            <p id="batch-params" class="params-summary"></p>
+            <button id="batch-goto-params" class="btn btn-ghost btn-sm">到"单张调试"页调整参数 →</button>
+          </div>
+          <div class="btn-row actions">
+            <button id="batch-preview" class="btn">预览任务</button>
+            <button id="batch-start" class="btn btn-primary">开始批处理</button>
+            <button id="batch-cancel" class="btn btn-danger" hidden disabled>取消</button>
+          </div>
+        </aside>
+        <div class="workspace batch-results">
+          <div class="card progress-card">
+            <div class="progress-head">
+              <span id="batch-progress-text"></span>
+              <span id="batch-counts" class="counts"></span>
+            </div>
+            <div class="progress"><div id="batch-bar" class="progress-bar"></div></div>
+            <div id="batch-report" class="report-row" hidden></div>
+          </div>
+          <div class="card table-wrap">
+            <table class="table">
+              <thead>
+                <tr>
+                  <th class="num-col">#</th>
+                  <th>照片</th>
+                  <th>状态</th>
+                  <th>人脸</th>
+                  <th title="读取 / 处理 / 写出">读 / 修 / 写</th>
+                  <th>说明</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="batch-rows"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+
+      <!-- 引擎设置 -->
+      <section id="tab-engine" class="tab-page engine-page" hidden>
+        <div class="engine-grid">
+          <div class="card">
+            <h3>状态</h3>
+            <div id="engine-state" class="engine-state"></div>
+            <dl class="kv">
+              <dt>已加载模型</dt>
+              <dd id="engine-tags" class="tags"></dd>
+              <dt>ONNX Runtime</dt>
+              <dd id="engine-ort" class="mono small"></dd>
+            </dl>
+            <pre id="engine-error" class="error-box" hidden></pre>
+            <button id="engine-load" class="btn btn-primary">立即加载</button>
+          </div>
+          <div class="card">
+            <h3>设置</h3>
+            <div class="field">
+              <label class="field-label" for="engine-models-dir">模型目录</label>
+              <div class="file-row">
+                <input id="engine-models-dir" class="input mono" spellcheck="false" />
+                <button id="engine-pick-dir" class="btn btn-sm">选择…</button>
+              </div>
+            </div>
+            <div class="field">
+              <label class="field-label" for="engine-landmarks">关键点模型</label>
+              <select id="engine-landmarks" class="input"></select>
+            </div>
+            <div class="field">
+              <label class="field-label" for="engine-threads">ONNX 线程数</label>
+              <input id="engine-threads" class="input num" type="number" min="1" max="64" />
+            </div>
+            <div class="field">
+              <label class="field-label">可选模型（文件不存在时自动跳过）</label>
+              <div id="engine-optional" class="switch-list"></div>
+            </div>
+            <div class="btn-row">
+              <button id="engine-apply" class="btn btn-primary">应用设置</button>
+              <button id="engine-reset" class="btn btn-ghost">恢复默认</button>
+            </div>
+          </div>
+          <div class="card notes">
+            <h3>说明</h3>
+            <ul>
+              <li>必需模型：人脸检测 <code>version-RFB-320.onnx</code> 与所选关键点模型（<code>2d106det.onnx</code> 或 Face Mesh）。</li>
+              <li>模型目录默认取当前目录下的 <code>models/</code>，找不到时从程序所在位置往上找。</li>
+              <li>ONNX Runtime 动态库按 <code>ORT_DYLIB_PATH</code> → <code>runtime/</code> → 程序目录查找；每个进程只加载一次，更换需重启界面。</li>
+              <li>应用设置后，下次打开 / 处理照片时按新设置加载模型，当前照片会自动重新检测人脸。</li>
+              <li>没有模型时照片仍可打开，只做与人脸无关的调整（亮度、饱和度、LUT 等）。</li>
+            </ul>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <div class="drop-overlay" aria-hidden="true">
+      <div class="drop-card"><span class="drop-single">松开以打开照片</span><span class="drop-batch">松开以添加到批处理输入</span></div>
+    </div>
+    <div id="toasts" class="toasts" aria-live="polite"></div>
+  </body>
+</html>

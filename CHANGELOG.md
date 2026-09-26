@@ -1,5 +1,27 @@
 # CHANGELOG
 
+## 0.6.0 (2026-09-25)
+
+图形界面：手动测试各项修图功能的桌面程序（`gui/`，[gui/README.md](gui/README.md)）。
+
+- 新增工作区成员 `portrait-retouch-gui`（Tauri 2，前端为无构建步骤的原生 ES 模块）：
+  - 单张调试：打开 / 拖入照片，在缩小的工作分辨率上调参并自动处理，保存时按原图分辨率重做；
+  - 查看：对比分割线、并排、原图 / 结果，按住空格看原图；
+  - 调试视图：关键点、皮肤遮罩（脸 / 身体）、人像抠图、皮肤概率、AI 修复区；
+  - 批量处理：进度、剩余时间估算、取消、报告；
+  - 引擎设置：模型目录、关键点模型、线程数、可选模型开关、加载状态。
+  界面与命令行共用参数组装、读写图与批处理代码，保存结果与 `retouch batch` 输出逐字节相同。
+  后端 19 个单元测试；`gui/tests/smoke.mjs` 通过 CDP 驱动真实界面做冒烟测试。
+- 库：新增 `options::ParamOptions`：用户参数（预设 + 覆盖项 / 手动参数、LUT、形变系数、遮罩 LUT）→ `RetouchParams`
+  的唯一组装逻辑。命令行改为 `ParamArgs → ParamOptions → build()`，默认值取自 `ParamOptions::default()`；
+  重构前后命令行输出逐位相同。
+- 库：`Preset::builtin_names` / `Preset::load_named`（内置名或 JSON 路径）、`Engine::model_tags`；
+  `batch::OutputFormat` 可反序列化。
+- 库：批处理可取消——`BatchConfig::cancel`（`Arc<AtomicBool>`）置位后不再开始新的照片，已在写盘的照片照常完成，
+  其余记为 skipped（"已取消"）；`BatchReport::cancelled`。
+- 根目录 `Cargo.toml` 成为工作区（`default-members = ["."]`）：根目录的 `cargo build / test / clippy` 行为不变；
+  `Cargo.lock` 中已有的 187 个依赖版本不变。
+
 ## 0.5.0 (2026-09-24)
 
 批量处理与第二批样张（7 张原片、14 张脸）的对比优化（`doc/test_report_batch.md`）。

@@ -1,0 +1,7 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "主窗口：Tauri 核心 API（事件监听、路径转换）。应用自己的命令默认对所有窗口开放。",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

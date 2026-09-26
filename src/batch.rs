@@ -4,7 +4,8 @@
 //! - **三段流水**：读图线程预取下一张（解码 + EXIF 转正），主线程修图（内部 rayon 并行），
 //!   写图线程编码落盘。读写与计算重叠，每张省下约 1–2 s。
 //! - **逐张隔离**：解码、修图（含 panic）、写盘的错误只记在该张的报告里，不中断整批。
-//! - **可续跑**：输出原子写入（临时文件 + 改名），已存在的输出默认跳过；`overwrite` 时覆盖。
+//! - **可续跑**：输出原子写入（临时文件 + 改名），已存在的输出默认跳过；`overwrite` 时覆盖；
+//! - **可取消**：`BatchConfig::cancel` 置位后不再开始新的照片，已在写盘的照片照常完成，其余记为"已取消"。
 //! - **报告**：每张的尺寸、方向、人脸（数量 / 性别 / 年龄 / 瞳距 / 侧脸角）、冲印设置、各阶段耗时与状态，
 //!   CSV（带 BOM，Excel 可直接打开中文路径）与 JSON 两份。
 //!
@@ -17,18 +18,19 @@ use crate::photo::{self, Photo, PhotoMetadata};
 use crate::pipeline::{retouch_impl, RetouchParams};
 use anyhow::Context;
 use image::RgbImage;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{mpsc, Arc};
 use std::time::Instant;
 
 /// 默认扫描的扩展名（不区分大小写）。
 pub const DEFAULT_EXTENSIONS: [&str; 7] = ["jpg", "jpeg", "png", "tif", "tiff", "webp", "bmp"];
 
 /// 输出格式。
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OutputFormat {
     /// JPEG（jpeg-encoder，写回 ICC / EXIF）
@@ -63,6 +65,8 @@ pub struct BatchConfig {
     pub overwrite: bool,
     /// 每张的人脸关键点 JSON（与 `retouch detect --json` 同格式）写到该目录，保留相对路径
     pub landmarks_dir: Option<PathBuf>,
+    /// 取消标志（界面的"取消"按钮）：置为 true 后不再开始新的照片
+    pub cancel: Option<Arc<AtomicBool>>,
 }
 
 impl BatchConfig {
@@ -76,6 +80,7 @@ impl BatchConfig {
             jpeg_quality: photo::DEFAULT_JPEG_QUALITY,
             overwrite: false,
             landmarks_dir: None,
+            cancel: None,
         }
     }
 }
@@ -332,6 +337,8 @@ impl ItemReport {
 pub struct BatchReport {
     pub items: Vec<ItemReport>,
     pub total_ms: f64,
+    /// 是否被取消（未开始的照片记为 skipped，原因"已取消"）
+    pub cancelled: bool,
 }
 
 impl BatchReport {
@@ -431,6 +438,12 @@ pub fn run(
 ) -> anyhow::Result<BatchReport> {
     let t_all = Instant::now();
     let total = items.len();
+    let cancelled = || {
+        config
+            .cancel
+            .as_ref()
+            .is_some_and(|c| c.load(Ordering::Relaxed))
+    };
     std::fs::create_dir_all(&config.output_dir)
         .with_context(|| format!("创建输出目录 {}", config.output_dir.display()))?;
     let mut reports: Vec<Option<ItemReport>> = vec![None; total];
@@ -457,6 +470,9 @@ pub fn run(
         let todo_ref = &todo;
         scope.spawn(move || {
             for &i in todo_ref {
+                if cancelled() {
+                    break;
+                }
                 let t = Instant::now();
                 let photo = catch_unwind(|| Photo::load(&items[i].input)).unwrap_or_else(|p| {
                     Err(anyhow::anyhow!("解码时 panic：{}", panic_message(&p)))
@@ -492,6 +508,10 @@ pub fn run(
 
         for (i, loaded, load_ms) in load_rx {
             let item = &items[i];
+            if cancelled() {
+                // 已预取但尚未开始的照片：丢弃，稍后统一记为"已取消"
+                continue;
+            }
             on_event(BatchEvent::Started {
                 index: i,
                 total,
@@ -581,9 +601,23 @@ pub fn run(
         Ok(())
     })?;
 
+    // 取消后没有开始的照片
+    let was_cancelled = cancelled();
+    for &i in &todo {
+        if reports[i].is_none() {
+            let r = ItemReport::new(&items[i], ItemStatus::Skipped, "已取消");
+            on_event(BatchEvent::Finished {
+                index: i,
+                total,
+                report: &r,
+            });
+            reports[i] = Some(r);
+        }
+    }
     Ok(BatchReport {
         items: reports.into_iter().flatten().collect(),
         total_ms: ms(t_all),
+        cancelled: was_cancelled,
     })
 }
 
@@ -769,6 +803,38 @@ mod tests {
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(json).unwrap()).unwrap();
         assert_eq!(v["items"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn run_can_be_cancelled_between_photos() {
+        let t = TempDir::new("cancel");
+        let inp = t.0.join("in");
+        for k in 0..4 {
+            write_png(&inp.join(format!("p{k}.png")), 16, 16);
+        }
+        let flag = Arc::new(AtomicBool::new(false));
+        let mut cfg = BatchConfig::new(vec![inp], t.0.join("out"));
+        cfg.format = OutputFormat::Png;
+        cfg.cancel = Some(flag.clone());
+        let items = plan(&cfg).unwrap();
+        let mut finished = 0;
+        let report = run(None, &RetouchParams::identity(), &cfg, &items, &mut |e| {
+            // 第一张开始处理时按下"取消"：这一张照常完成，后面的都不再开始
+            if let BatchEvent::Started { index: 0, .. } = e {
+                flag.store(true, Ordering::Relaxed);
+            }
+            if let BatchEvent::Finished { .. } = e {
+                finished += 1;
+            }
+        })
+        .unwrap();
+        assert!(report.cancelled);
+        assert_eq!(report.items.len(), 4);
+        assert_eq!(finished, 4, "every photo gets a Finished event");
+        assert_eq!(report.count(ItemStatus::Done), 1);
+        assert_eq!(report.count(ItemStatus::Skipped), 3);
+        assert!(report.items[1..].iter().all(|r| r.message == "已取消"));
+        assert!(items[0].output.exists() && !items[1].output.exists());
     }
 
     #[test]

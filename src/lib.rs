@@ -31,6 +31,7 @@ pub mod debug;
 pub mod engine;
 pub mod face;
 pub mod geom;
+pub mod options;
 pub mod photo;
 pub mod pipeline;
 pub mod preset;
@@ -46,6 +47,7 @@ pub use engine::{Engine, EngineConfig, LandmarkKind};
 pub use face::attribute::Gender;
 pub use face::semantic::{FaceBox, FaceKeyPoints, LandmarkModel};
 pub use geom::P;
+pub use options::ParamOptions;
 pub use photo::{Photo, PhotoMetadata};
 pub use pipeline::{
     retouch_impl, MaskedLutOp, Precomp, RetouchParams, SmoothMode, StyleFilter, WhitenMode,

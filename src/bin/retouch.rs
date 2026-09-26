@@ -3,17 +3,16 @@
 use anyhow::Context;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use portrait_retouch::batch::{self, BatchConfig, BatchEvent, ItemStatus, OutputFormat};
-use portrait_retouch::color::lookup512::{identity_lookup512, load_lookup512};
+use portrait_retouch::color::lookup512::identity_lookup512;
 use portrait_retouch::color::lut3d::Lut3D;
 use portrait_retouch::debug;
 use portrait_retouch::photo::{self, Photo};
-use portrait_retouch::preset::{kv_to_json, Preset};
+use portrait_retouch::preset::Preset;
 use portrait_retouch::{
-    Engine, EngineConfig, FaceKeyPoints, GrayF32, LandmarkKind, MaskedLutOp, ReshapeStyle,
-    RetouchParams, SmoothMode, StyleFilter, WarpCoefficients, WhitenMode,
+    Engine, EngineConfig, FaceKeyPoints, LandmarkKind, ParamOptions, ReshapeStyle, RetouchParams,
+    SmoothMode,
 };
-use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::path::PathBuf;
 use std::time::Instant;
 
 #[derive(Parser)]
@@ -121,7 +120,7 @@ struct ParamArgs {
     #[arg(long = "set")]
     sets: Vec<String>,
     /// 磨皮强度 0..1
-    #[arg(long, default_value_t = 0.5)]
+    #[arg(long, default_value_t = option_defaults().smooth)]
     smooth: f32,
     /// 磨皮模式
     #[arg(long, value_enum, default_value_t = ModeArg::Faithful)]
@@ -142,31 +141,31 @@ struct ParamArgs {
     #[arg(long)]
     no_embedded_develop: bool,
     /// HSB 亮度（1.0 = 不变，美狐默认 1.1）
-    #[arg(long, default_value_t = 1.1)]
+    #[arg(long, default_value_t = option_defaults().brightness)]
     brightness: f32,
     /// HSB 饱和度（1.0 = 不变，美狐默认 1.1）
-    #[arg(long, default_value_t = 1.1)]
+    #[arg(long, default_value_t = option_defaults().saturation)]
     saturation: f32,
     /// 关闭 log 提亮曲线
     #[arg(long)]
     no_log: bool,
     /// 美白 0..1
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(long, default_value_t = option_defaults().whiten)]
     whiten: f32,
     /// 美白查找图（512×512 PNG），不指定则用参数化曲线
     #[arg(long)]
     whiten_lut: Option<PathBuf>,
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(long, default_value_t = option_defaults().thin_face)]
     thin_face: f32,
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(long, default_value_t = option_defaults().big_eye)]
     big_eye: f32,
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(long, default_value_t = option_defaults().thin_nose)]
     thin_nose: f32,
     /// 缩下巴 / 提升下半脸 0..1
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(long, default_value_t = option_defaults().chin_lift)]
     chin_lift: f32,
     /// 整体收窄比例（如 0.03）
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(long, default_value_t = option_defaults().face_narrow)]
     face_narrow: f32,
     /// 形变风格
     #[arg(long, value_enum, default_value_t = StyleArg::Meihu)]
@@ -180,140 +179,78 @@ struct ParamArgs {
     /// 风格 LUT：512×512 PNG 或 .cube
     #[arg(long)]
     lut: Option<PathBuf>,
-    #[arg(long, default_value_t = 0.8)]
+    #[arg(long, default_value_t = option_defaults().style_intensity)]
     lut_intensity: f32,
     /// 遮罩 LUT：`<cube>:<mask.png>[:invert][:strength]`，可重复
     #[arg(long = "masked-lut")]
     masked_luts: Vec<String>,
     /// 方案 B 高反差半径（相对短边 1000 px）
-    #[arg(long, default_value_t = 8.0)]
+    #[arg(long, default_value_t = option_defaults().freqsep_radius)]
     freqsep_radius: f32,
     /// 方案 B 锐化系数
-    #[arg(long, default_value_t = 0.6)]
+    #[arg(long, default_value_t = option_defaults().freqsep_sharpness)]
     freqsep_sharpness: f32,
     /// 方案 C 锐化系数
-    #[arg(long, default_value_t = 0.0)]
+    #[arg(long, default_value_t = option_defaults().gpupixel_sharpen)]
     gpupixel_sharpen: f32,
 }
 
-fn load_preset(name: &str) -> anyhow::Result<Preset> {
-    match name.to_ascii_lowercase().as_str() {
-        "cream" | "cream_skin" | "creamskin" | "奶油肌" => Ok(Preset::cream_skin()),
-        _ => Preset::load(Path::new(name)),
-    }
+/// 手动参数的默认值（与库中 [`ParamOptions`] 一致，命令行与图形界面共用）。
+fn option_defaults() -> ParamOptions {
+    ParamOptions::default()
 }
 
 impl ParamArgs {
+    /// 命令行选项 → 库的 [`ParamOptions`]（组装逻辑只在库里一处）。
+    fn to_options(&self) -> ParamOptions {
+        ParamOptions {
+            preset: self.preset.clone(),
+            sets: self.sets.clone(),
+            smooth: self.smooth,
+            smooth_mode: match self.mode {
+                ModeArg::Faithful => SmoothMode::Faithful,
+                ModeArg::Freqsep => SmoothMode::FreqSep,
+                ModeArg::Gpupixel => SmoothMode::GpuPixel,
+                ModeArg::Cream => SmoothMode::Cream,
+            },
+            restrict_to_face: !self.no_face_restrict,
+            brightness: self.brightness,
+            saturation: self.saturation,
+            apply_log_curve: !self.no_log,
+            whiten: self.whiten,
+            thin_face: self.thin_face,
+            big_eye: self.big_eye,
+            thin_nose: self.thin_nose,
+            chin_lift: self.chin_lift,
+            face_narrow: self.face_narrow,
+            reshape_style: match self.reshape {
+                StyleArg::Meihu => ReshapeStyle::Meihu,
+                StyleArg::Gpupixel => ReshapeStyle::GpuPixel,
+            },
+            attenuate_yaw: !self.no_yaw_attenuation,
+            freqsep_radius: self.freqsep_radius,
+            freqsep_sharpness: self.freqsep_sharpness,
+            gpupixel_sharpen: self.gpupixel_sharpen,
+            body_skin: !self.no_body,
+            ai_blemish: !self.no_ai_blemish,
+            embedded_develop: if self.embedded_develop {
+                Some(true)
+            } else if self.no_embedded_develop {
+                Some(false)
+            } else {
+                None
+            },
+            whiten_lut: self.whiten_lut.clone(),
+            warp_coeffs: self.coeffs.clone(),
+            style_lut: self.lut.clone(),
+            style_intensity: self.lut_intensity,
+            masked_luts: self.masked_luts.clone(),
+        }
+    }
+
     fn build(&self) -> anyhow::Result<RetouchParams> {
-        let mut p = if let Some(name) = &self.preset {
-            let mut preset = load_preset(name)?;
-            for s in &self.sets {
-                preset.merge_json(&kv_to_json(s)?)?;
-            }
-            let mut p = preset.to_params()?;
-            if self.no_body {
-                p.body_skin = false;
-            }
-            if self.no_ai_blemish {
-                p.ai_blemish = 0.0;
-            }
-            p
-        } else {
-            RetouchParams {
-                smooth: self.smooth,
-                smooth_mode: match self.mode {
-                    ModeArg::Faithful => SmoothMode::Faithful,
-                    ModeArg::Freqsep => SmoothMode::FreqSep,
-                    ModeArg::Gpupixel => SmoothMode::GpuPixel,
-                    ModeArg::Cream => SmoothMode::Cream,
-                },
-                restrict_to_face: !self.no_face_restrict,
-                body_skin: !self.no_body,
-                ai_blemish: if self.no_ai_blemish { 0.0 } else { 1.0 },
-                brightness: self.brightness,
-                saturation: self.saturation,
-                apply_log_curve: !self.no_log,
-                whiten: self.whiten,
-                thin_face: self.thin_face,
-                big_eye: self.big_eye,
-                thin_nose: self.thin_nose,
-                chin_lift: self.chin_lift,
-                face_narrow: self.face_narrow,
-                reshape_style: match self.reshape {
-                    StyleArg::Meihu => ReshapeStyle::Meihu,
-                    StyleArg::Gpupixel => ReshapeStyle::GpuPixel,
-                },
-                attenuate_yaw: !self.no_yaw_attenuation,
-                style_intensity: self.lut_intensity,
-                freqsep_radius: self.freqsep_radius,
-                freqsep_sharpness: self.freqsep_sharpness,
-                gpupixel_sharpen: self.gpupixel_sharpen,
-                ..Default::default()
-            }
-        };
-        if self.embedded_develop {
-            p.embedded_develop = true;
-        }
-        if self.no_embedded_develop {
-            p.embedded_develop = false;
-        }
-        if let Some(path) = &self.whiten_lut {
-            p.whiten_mode = WhitenMode::Lookup512(Arc::new(load_lookup512(path)?));
-        }
-        if let Some(path) = &self.coeffs {
-            let text = std::fs::read_to_string(path)
-                .with_context(|| format!("read {}", path.display()))?;
-            p.warp_coeffs = serde_json::from_str::<WarpCoefficients>(&text)?;
-        }
-        if let Some(path) = &self.lut {
-            p.style = Some(load_style(path)?);
-            if self.preset.is_some() {
-                p.style_intensity = self.lut_intensity;
-            }
-        }
-        for spec in &self.masked_luts {
-            p.masked_ops.push(parse_masked_lut(spec)?);
-        }
-        Ok(p)
+        self.to_options().build()
     }
-}
-
-fn load_style(path: &Path) -> anyhow::Result<StyleFilter> {
-    let ext = path
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_ascii_lowercase();
-    if ext == "cube" {
-        Ok(StyleFilter::Cube(Arc::new(Lut3D::load(path)?)))
-    } else {
-        Ok(StyleFilter::Lookup512(Arc::new(load_lookup512(path)?)))
-    }
-}
-
-fn parse_masked_lut(spec: &str) -> anyhow::Result<MaskedLutOp> {
-    let parts: Vec<&str> = spec.split(':').collect();
-    anyhow::ensure!(
-        parts.len() >= 2,
-        "masked-lut spec must be <cube>:<mask.png>[:invert][:strength]"
-    );
-    let lut = Lut3D::load(parts[0])?;
-    let mask_img = image::open(parts[1])?.to_luma8();
-    let mut invert = false;
-    let mut strength = 1.0;
-    for p in &parts[2..] {
-        if *p == "invert" {
-            invert = true;
-        } else if let Ok(v) = p.parse::<f32>() {
-            strength = v;
-        }
-    }
-    Ok(MaskedLutOp {
-        lut: Arc::new(lut),
-        mask: Arc::new(GrayF32::from_luma8(&mask_img)),
-        invert,
-        strength,
-    })
 }
 
 #[derive(Args)]
@@ -442,7 +379,7 @@ fn main() -> anyhow::Result<()> {
         Cmd::IdentityLut(a) => cmd_identity_lut(a),
         Cmd::Bench(a) => cmd_bench(a),
         Cmd::Preset(a) => {
-            let p = load_preset(&a.name)?;
+            let p = Preset::load_named(&a.name)?;
             p.save(&a.output)?;
             eprintln!("saved {}", a.output.display());
             Ok(())
@@ -452,21 +389,7 @@ fn main() -> anyhow::Result<()> {
 
 /// 引擎横幅：关键点模型与已加载的可选模型。
 fn engine_tags(e: &Engine) -> String {
-    let mut tags = vec![e.landmark_name().to_string()];
-    for (on, tag) in [
-        (e.has_parsing(), "+parsing"),
-        (e.has_matting(), "+matting"),
-        (e.has_attribute(), "+genderage"),
-        (e.has_ai_blemish(), "+ai-blemish"),
-    ] {
-        if on {
-            tags.push(tag.to_string());
-        }
-    }
-    if let Some(n) = e.skin_seg_name() {
-        tags.push(format!("+skinseg({n})"));
-    }
-    tags.join(" ")
+    e.model_tags().join(" ")
 }
 
 fn describe_faces(faces: &[FaceKeyPoints]) {
