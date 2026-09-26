@@ -33,6 +33,7 @@ tools/          bake_lut.py（曲线滤镜包烘焙）、oracle_numpy.py（数�
                 abpn/（ABPN 网络定义与 ONNX 导出）
 tests/          identity.rs（恒等性）、golden.rs（视觉回归，需样张目录）
 test/           用户提供的样张与像素蛋糕导出图（真实人物照片，不入库；各测试报告的复现命令需要本地有这些照片）
+out/            测试产物（不入库），只收录 out/对比图/：两批样张「奶油肌」批处理的完整对比（原图 | 本程序 | 像素蛋糕）
 benches/        criterion 基准
 examples/       dump_landmarks.rs（关键点核对）
 example/        参考项目浅克隆（scripts/fetch_examples.sh，不入库）

@@ -4,7 +4,9 @@
 /runtime/*.so
 /runtime/*.dylib
 /example/
-/out/
+# 测试产物不入库，只收录两批样张的完整对比图（tools/sample_montages.py compare_all）
+/out/*
+!/out/对比图/
 /tests/golden/
 /tests/samples/
 *.log
