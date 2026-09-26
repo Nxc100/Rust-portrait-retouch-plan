@@ -76,6 +76,38 @@ pub fn fast_gaussian(src: &GrayF32, sigma: f32) -> GrayF32 {
     box_filter_n(src, r, 3)
 }
 
+/// 遮罩内的高斯低通（归一化卷积 `G(v·m) / G(m)`）：遮罩外的背景、衣物不参与平均，
+/// 皮肤边缘处的低频值不会被拉亮或拉暗。遮罩权重过小处保留原值。
+pub fn masked_gaussian(src: &GrayF32, mask: &GrayF32, sigma: f32) -> GrayF32 {
+    let weighted: Vec<f32> = src
+        .data
+        .par_iter()
+        .zip(&mask.data)
+        .map(|(v, m)| v * m)
+        .collect();
+    let num = fast_gaussian(&GrayF32::from_vec(src.w, src.h, weighted), sigma);
+    let den = fast_gaussian(mask, sigma);
+    let data = num
+        .data
+        .par_iter()
+        .zip(&den.data)
+        .zip(&src.data)
+        .map(|((n, d), v)| if *d > 1e-3 { n / d } else { *v })
+        .collect();
+    GrayF32::from_vec(src.w, src.h, data)
+}
+
+/// 导向滤波系数计算的下采样倍数（按全分辨率半径选择：半径越大越可以粗算，质量几乎不变）。
+pub fn subsample_for(radius: usize) -> usize {
+    if radius >= 8 {
+        4
+    } else if radius >= 3 {
+        2
+    } else {
+        1
+    }
+}
+
 fn zip_map(a: &GrayF32, b: &GrayF32, f: impl Fn(f32, f32) -> f32 + Sync) -> GrayF32 {
     let data: Vec<f32> = a
         .data
@@ -155,6 +187,24 @@ mod tests {
         g.data = vec![0.0, 0.0, 1.0, 0.0, 0.0];
         let b = box_filter(&g, 1);
         assert!((b.data[2] - 1.0 / 3.0).abs() < 1e-6 && (b.data[0]).abs() < 1e-6);
+    }
+
+    #[test]
+    fn masked_lowpass_ignores_pixels_outside_the_mask() {
+        let (w, h) = (60, 20);
+        let mut src = GrayF32::new(w, h);
+        let mut mask = GrayF32::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let inside = x < 30;
+                src.data[y * w + x] = if inside { 50.0 } else { 95.0 };
+                mask.data[y * w + x] = if inside { 1.0 } else { 0.0 };
+            }
+        }
+        let low = masked_gaussian(&src, &mask, 4.0);
+        // 皮肤边缘处的低频值不被旁边的亮背景拉高
+        assert!((low.data[10 * w + 29] - 50.0).abs() < 1e-3);
+        assert!((low.data[10 * w + 5] - 50.0).abs() < 1e-3);
     }
 
     #[test]

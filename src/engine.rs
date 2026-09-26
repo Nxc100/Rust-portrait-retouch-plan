@@ -445,6 +445,25 @@ impl Engine {
         Ok(pre.skin_masks(faces, body))
     }
 
+    /// 奶油肌颈纹淡化的处理权重（全图，0..1；调试 / 可视化用）。遮罩的构建与 [`Engine::skin_masks`] 相同，
+    /// 底图与 [`Engine::retouch`] 相同（AI 瑕疵补丁在缓存里时直接复用）。
+    pub fn neck_weights(
+        &self,
+        img: &image::RgbImage,
+        faces: &[FaceKeyPoints],
+        p: &RetouchParams,
+    ) -> anyhow::Result<GrayF32> {
+        let pre = self.precomp(img);
+        if p.body_skin {
+            pre.set_matte(self.person_matte(img)?);
+            pre.set_skin_prob(self.skin_prob(img)?);
+        }
+        if p.ai_blemish > 0.0 && !faces.is_empty() {
+            self.ai_patches(&pre, faces)?;
+        }
+        Ok(crate::pipeline::cream_neck_weights(&pre, faces, p))
+    }
+
     /// 完整修图；`faces` 为 `detect_faces` 的结果（可缓存，滑块调整时不必重检）。
     pub fn retouch(
         &self,

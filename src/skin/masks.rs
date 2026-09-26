@@ -3,13 +3,16 @@
 //! 无解析模型时退化为"轮廓多边形 ∧ 颜色规则"，无抠图模型时身体遮罩退化为下巴以下的颈部梯形 ∧ 颜色规则。
 //! 身体皮肤用严格肤色规则（YCbCr + 饱和度）并做形态学清理，避免亮片、红花、礁石被判为皮肤；
 //! 有语义皮肤分割（`face::skinseg`）时再与其概率图取交集——米色缎面婚纱、粉色团扇、金饰的颜色都落在
-//! 肤色规则内，只有语义模型能把它们排除；身体遮罩在半分辨率上计算后上采样。
+//! 肤色规则内，只有语义模型能把它们排除。两者各有盲区（颜色阈值在有色光下漏掉皮肤，语义模型偶尔留下孤岛），
+//! 有抠图与语义模型时按颜色连续性修正：遮罩的边界只落在真正的颜色边缘上（`skin::continuity`）。
+//! 身体遮罩在半分辨率上计算后上采样。
 
 use crate::buffer::{GrayF32, ImgF32};
 use crate::color::lab::rgb_to_lab;
 use crate::face::parsing::{EXCLUDE_CLASSES, FACE_SKIN_CLASSES, NECK_CLASSES};
 use crate::face::semantic::FaceKeyPoints;
 use crate::geom::P;
+use crate::skin::continuity::reconcile_body_mask;
 use crate::skin::guided::{fast_gaussian, guided_filter};
 use crate::skin::mask::{fill_polygon, is_skin_rgb, is_skin_strict};
 use rayon::prelude::*;
@@ -256,9 +259,9 @@ pub fn build_skin_masks(
             .map(|p| if is_skin_strict(*p) { 1.0 } else { 0.0 })
             .collect();
         let strict = GrayF32::from_vec(hw, hh, strict);
-        let mut b = match matte {
-            Some(alpha) => {
-                let a_s = alpha.resize(hw, hh);
+        let person = matte.map(|alpha| alpha.resize(hw, hh));
+        let mut b = match &person {
+            Some(a_s) => {
                 let data: Vec<f32> = a_s
                     .data
                     .par_iter()
@@ -285,6 +288,10 @@ pub fn build_skin_masks(
                 .par_iter_mut()
                 .zip(&g.data)
                 .for_each(|(v, p)| *v *= ((*p - 0.15) / 0.25).clamp(0.0, 1.0));
+            // 颜色连续性：找回有色光下被颜色规则漏掉的皮肤，去掉语义模型在同色区域里留下的孤岛
+            if let Some(person) = &person {
+                reconcile_body_mask(&mut b, &small, person, &g, &strict, ed_mean * s);
+            }
         }
         b = morph_clean(&b, (0.02 * ed_mean * s).max(1.5));
         b.max_inplace(&neck.resize(hw, hh));

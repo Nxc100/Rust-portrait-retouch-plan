@@ -511,6 +511,11 @@ fn cmd_apply(a: ApplyArgs) -> anyhow::Result<()> {
                 if let Some(b) = &masks.body {
                     b.to_luma8().save(dir.join("skin_body.png"))?;
                 }
+                if params.smooth_mode == SmoothMode::Cream {
+                    e.neck_weights(&img, &faces, &params)?
+                        .to_luma8()
+                        .save(dir.join("neck_zone.png"))?;
+                }
                 if let Some(m) = e.person_matte(&img)? {
                     m.to_luma8().save(dir.join("matte.png"))?;
                 }

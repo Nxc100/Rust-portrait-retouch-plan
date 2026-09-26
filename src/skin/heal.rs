@@ -32,6 +32,7 @@ use crate::buffer::GrayF32;
 use crate::color::lab::LabPlanes;
 use crate::skin::blemish::{down, gradient_mag};
 use crate::skin::guided::fast_gaussian;
+use crate::skin::morph::components;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -152,64 +153,6 @@ fn ring_mean(src: &GrayF32, r: f32) -> GrayF32 {
     let big = fast_gaussian(src, 2.5 * r);
     let small = fast_gaussian(src, 0.8 * r);
     zip2(&big, &small, move |b, s| (b - c * s) / (1.0 - c))
-}
-
-pub(crate) struct Component {
-    pub(crate) pixels: Vec<usize>,
-    pub(crate) x0: usize,
-    pub(crate) y0: usize,
-    pub(crate) x1: usize,
-    pub(crate) y1: usize,
-}
-
-/// 4 连通域（`limit` 为单个连通域的扫描上限，超过即视为大区域并整体丢弃）。
-pub(crate) fn components(hit: &[u8], w: usize, h: usize, limit: usize) -> Vec<Component> {
-    let mut label = vec![false; w * h];
-    let mut out = Vec::new();
-    let mut stack: Vec<usize> = Vec::new();
-    for start in 0..w * h {
-        if hit[start] == 0 || label[start] {
-            continue;
-        }
-        stack.clear();
-        stack.push(start);
-        label[start] = true;
-        let mut comp = Component {
-            pixels: Vec::new(),
-            x0: w,
-            y0: h,
-            x1: 0,
-            y1: 0,
-        };
-        let mut too_big = false;
-        while let Some(i) = stack.pop() {
-            comp.pixels.push(i);
-            let (x, y) = (i % w, i / w);
-            comp.x0 = comp.x0.min(x);
-            comp.x1 = comp.x1.max(x);
-            comp.y0 = comp.y0.min(y);
-            comp.y1 = comp.y1.max(y);
-            let nb = [
-                (x > 0).then(|| i - 1),
-                (x + 1 < w).then(|| i + 1),
-                (y > 0).then(|| i - w),
-                (y + 1 < h).then(|| i + w),
-            ];
-            for j in nb.into_iter().flatten() {
-                if hit[j] != 0 && !label[j] {
-                    label[j] = true;
-                    stack.push(j);
-                }
-            }
-            if comp.pixels.len() > limit {
-                too_big = true;
-            }
-        }
-        if !too_big {
-            out.push(comp);
-        }
-    }
-    out
 }
 
 /// 主轴伸长率（PCA）：√(λ₁/λ₂)，单像素为 1。

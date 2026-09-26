@@ -1,6 +1,6 @@
 [package]
 name = "portrait-retouch-gui"
-version = "0.6.0"
+version = "0.6.3"
 description = "portrait-retouch 的手动测试界面（Tauri 2）"
 edition = "2021"
 rust-version = "1.88"

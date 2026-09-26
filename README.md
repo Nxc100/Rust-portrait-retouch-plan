@@ -9,7 +9,7 @@
 | 磨皮 A（直播磨皮，`faithful`） | GPUImage 双边 + Sobel + 肤色规则组合 + log 提亮 + HSB | 美狐 `BBGPUImageBeautifyFilter` |
 | 磨皮 B（自然磨皮，`freqsep`） | 高反差保留 + 肤色曲线 + 亮度锐化 | YUCIHighPassSkinSmoothing |
 | 磨皮 C（`gpupixel`） | 均值 / 方差自适应磨皮 | pixpark/gpupixel |
-| **奶油肌**（`cream`，预设 `--preset cream`） | 人脸解析 + 人像抠图 + 语义皮肤分割的皮肤遮罩、AI 瑕疵分割 + 修复（ABPN）、疤痕 / 大痣修复画笔（能量判据 + 调和插值 + 纹理移植）、能量自适应的保纹理磨皮、匀肤 / 肤色统一、奶油色调、眼部清晰、按性别的瘦脸 / 缩下巴；与像素蛋糕一样再应用输入 JPEG 内嵌的 Camera Raw 设置 | 对像素蛋糕「奶油肌」导出图的逆向分析（doc/analysis/cream_skin.md、abpn.md；两张样张的对比 doc/test_report_cream.md、doc/test_report_x04.md） |
+| **奶油肌**（`cream`，预设 `--preset cream`） | 人脸解析 + 人像抠图 + 语义皮肤分割的皮肤遮罩、AI 瑕疵分割 + 修复（ABPN）、疤痕 / 大痣修复画笔（能量判据 + 调和插值 + 纹理移植）、能量自适应的保纹理磨皮、匀肤 / 肤色统一、奶油色调、眼部清晰、颈纹淡化（连同横过脖子的碎发）、身体遮罩按颜色连续性修正（有色光下的皮肤不漏）、按性别的瘦脸 / 缩下巴；可选再应用输入 JPEG 内嵌的 Camera Raw 设置（`--embedded-develop`，默认关闭） | 对像素蛋糕「奶油肌」导出图的逆向分析（doc/analysis/cream_skin.md、abpn.md；两张样张的对比 doc/test_report_cream.md、doc/test_report_x04.md；身体色调 doc/test_report_body_tone.md；颈纹 doc/test_report_neck.md；身体皮肤的阴影色块 doc/test_report_shadow_blotches.md） |
 | 美白 | 参数化曲线或 512 查找图 × 皮肤遮罩 | 方案 4.4 |
 | 瘦脸 / 大眼 / 瘦鼻 | `warpPositionToUse1` / `adjust_eye` / `newNarrowNose_2` 像素空间移植（另有 gpupixel 风格） | 美狐 `GLImageFaceChangeFilter` |
 | 风格滤镜 | 512×512 查找图、.cube 3D LUT、带空间遮罩的 LUT | GPUImage Lookup |
@@ -28,6 +28,7 @@ tools/          bake_lut.py（曲线滤镜包烘焙）、oracle_numpy.py（数�
                 compare_to_reference.py（与参考导出图定量对比）、texture_energy.py（按局部能量分箱的纹理衰减）、
                 develop_fit.py（Camera Raw 设置再应用的模型拟合）、montage.py（并排裁剪对比图）、
                 batch_compare.py（整批与参考导出逐脸对比）、skin_tone_fit.py（肤色目标色模型拟合）、
+                body_tone_fit.py（身体色调的拟合与评估）、
                 sample_montages.py（重新生成文档引用的样张对比图）、
                 abpn/（ABPN 网络定义与 ONNX 导出）
 tests/          identity.rs（恒等性）、golden.rs（视觉回归，需样张目录）
@@ -77,12 +78,12 @@ retouch identity-lut -o identity.png                                       # 恒
 
 ONNX Runtime 动态库查找顺序：`--ort-dylib` → `ORT_DYLIB_PATH` → `./runtime/` → 可执行文件目录 → 系统路径。
 
-- **批量处理**（`retouch batch`，doc/test_report_batch.md）：输入可以是目录或多个文件（`-r` 递归、`--ext` 限定扩展名），
+- **批量处理**（`retouch batch`，doc/test_report_batch.md；15 张新样张的批量测试 doc/test_report_batch_test.md）：输入可以是目录或多个文件（`-r` 递归、`--ext` 限定扩展名），
   输出与输入同名（扩展名换成 `--format jpg|png`），保留子目录结构。模型只加载一次，读写与修图重叠。
   单张失败只记入报告、不中断整批；输出原子写入，已存在的输出默认跳过，中断后重跑同一命令即可续跑（`--overwrite` 覆盖）。
   输出目录里写 `batch_report.csv`（Excel 可直接打开）与 `.json`：人脸数 / 性别、各阶段耗时、失败原因；有失败时退出码非零。
   `--dry-run` 只列出任务；`--landmarks-dir` 输出关键点 JSON（供 `tools/batch_compare.py` 对比）。
-  24 核 CPU 上 20–30 MP 的人像约 13 s / 张，内存峰值约 5–6 GB（与单张相同）。
+  16 核 24 线程的 CPU（i7-13700F）上 20–30 MP 的人像约 7–8 s / 张（「奶油肌」，15 张实测 4.1–13.6 s、平均 7.4 s），内存峰值约 5–6 GB（与单张相同）。
 - **照片方向**：读入时按 EXIF 方向把像素转正（相机直出的竖拍照片），写回的 EXIF 方向置为 1。
 - **Camera Raw 设置**（可选，默认关闭）：Lightroom / ACR 导出的 JPEG 会在 XMP 里记录冲印参数，并标注
   `crs:AlreadyApplied="True"`。`--embedded-develop` 会用拟合模型把这些参数再应用一次，复现像素蛋糕在"读取 XMP 调色"的
@@ -139,7 +140,7 @@ report.write(&cfg.output_dir)?;                         // batch_report.csv / .j
 ## 验证
 
 ```bash
-cargo test                                   # 75 单元 + 10 恒等性测试（只含库与命令行）
+cargo test                                   # 104 单元 + 10 恒等性测试（只含库与命令行）
 cargo test -p portrait-retouch-gui           # 图形界面后端 19 个单元测试；界面冒烟测试见 gui/README.md
 PORTRAIT_SAMPLES=tests/samples cargo test --release --test golden   # 视觉回归（样张目录不入库；UPDATE_GOLDEN=1 更新）
 cargo bench --bench retouch                  # 12MP / 1280 预览基准

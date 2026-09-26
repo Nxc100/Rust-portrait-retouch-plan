@@ -58,7 +58,7 @@
 
 | 环节 | 实现 | 文件 |
 |---|---|---|
-| 皮肤分割 | BiSeNet 人脸解析（19 类，脸 / 鼻 / 耳 = 皮肤，眉眼唇发衣排除；neck 归身体）+ MODNet 人像 alpha ∧ 严格肤色规则（YCbCr + 饱和度）+ 形态学清理；导向滤波羽化 | `face/parsing.rs`、`face/matting.rs`、`skin/masks.rs` |
+| 皮肤分割 | BiSeNet 人脸解析（19 类，脸 / 鼻 / 耳 = 皮肤，眉眼唇发衣排除；neck 归身体）+ MODNet 人像 alpha ∧ 严格肤色规则（YCbCr + 饱和度）∧ 语义皮肤概率 + 形态学清理；导向滤波羽化。第七轮：按颜色连续性修正身体遮罩——颜色规则在有色光下漏掉、语义模型认作皮肤、与已接受皮肤之间没有颜色边缘的连通块找回，被同色区域包围的语义孤岛去掉（doc/test_report_shadow_blotches.md） | `face/parsing.rs`、`face/matting.rs`、`skin/masks.rs`、`skin/continuity.rs` |
 | 性别分档 | insightface genderage（非商用；缺失时用 unknown 档） | `face/attribute.rs` |
 | AI 瑕疵（前置） | ABPN 瑕疵分割 UNet（768）+ 门控卷积修复网络（576 窗口）；逐脸 1.5× ROI；稀疏补丁缓存；缺模型自动跳过 | `skin/ai_blemish.rs`、`doc/analysis/abpn.md` |
 | 疤痕 / 大痣 | 零中心环核 + 暗 / 红 / **能量**三判据 + 滞后阈值 + PCA 伸长率 + 边界切断剔除；**调和插值**（多分辨率 Gauss-Seidel）+ **纹理移植**（16 方向搜索干净皮肤源块的高通分量） | `skin/heal.rs` |
@@ -66,6 +66,8 @@
 | 亮度三频段 + 能量自适应（第三轮） | `fine = L − G(0.005ed)`、`mid = G(0.005ed) − G(0.035ed)`、`low = G(0.035ed) − GF(0.08ed, eps 60)`；中频局部能量 `E = √G(mid²; 0.05ed)`，`α_mid(E) = α·(1 − 0.92·smoothstep(ln E_lo, ln E_hi, ln E))`（女 α 0.60、E 1.2–3.5，男 0.61、0.7–11）；细颗粒 α 女 0.26 / 男 0.05，细颗粒 / 中频分界下限 0.5 px（小脸的像素级颗粒按中频处理）；眼下椭圆区额外 +0.40 / +0.35。尺度用姿态稳健的 `scale_distance()`（侧脸不缩小） | `skin/cream.rs`、`face/semantic.rs` |
 | 匀肤 | a/b 导向滤波衰减（女 0.33、男 0.27、身体 0.35）+ 低频色度向"色度 ~ L 回归线"压缩（高光彩度低是物理规律，不拉平） | `skin/cream.rs` |
 | 色调（第四轮重做） | 钟形提亮 + 随黄度提亮（`lift_per_b`）、p90–p99.5 高光压制；低频色度按比例向目标肤色拉（女 a −0.105·(a−3.7)、b −0.149·(b−9.0)；男 −0.089·(a−8.3)、−0.090·(b−15.8)），再加随亮度变化的 b 偏移；16 张脸拟合（`tools/skin_tone_fit.py`），逐脸均值 R² 0.72–0.93 | `skin/cream.rs` |
+| 身体色调（第五轮） | 提亮与降黄的权重只看遮罩内的低频亮度（σ 0.03 瞳距当量；局部对比不变，暗褶纹不再被加深）；提亮形状为阴影到中间调的平台、L 64→88 渐弱到 10%；身体像素按到各张脸的距离软分配，混合各人的提亮 / 降红 / 降黄（女 4.6 / −0.85 / 黄度按 0.19 向 1.3 拉近，男 2.6 / −0.6 / −1.1）；7 张照片拟合（`tools/body_tone_fit.py`，doc/test_report_body_tone.md；比例降黄见 doc/test_report_shadow_blotches.md） | `skin/cream.rs` |
+| 颈纹淡化（第六轮） | 每张脸的脖子（解析的脖子类 × 身体遮罩）：色度低或黑顶帽深的像素是异物（项链、纹身、黑发），窄缝连成片、外扩 0.03 瞳距当量；异物用周围皮肤填上后导向滤波（半径 0.05 瞳距当量、eps 80），在局部中频能量窗内替换；再用 8 方向线段闭运算量出细长暗线（颈纹线芯、碎发；胡茬、毛孔等暗点为 0），原图上线深 3–6 L 以上的像素在平滑后填平。新娘 1V3A2922 的线深 5.51 → 1.60（像素蛋糕 2.30），项链、纹身、胡茬保留（doc/test_report_neck.md） | `skin/neck.rs`、`skin/morph.rs` |
 | 眼部清晰（第三轮） | 眼眶椭圆内 `L += k·(L − G(L; 0.04ed))`（女 0.30、男 0.25；像素蛋糕眼区 L 标准差 +4–5%）；椭圆只留睫毛余量，不锐化泪沟 | `skin/cream.rs` |
 | 冲印再应用（可选，默认关闭） | `color::develop` 近似"项目里开了读取 XMP 调色"时像素蛋糕对 Camera Raw 设置的再应用；「奶油肌」预设本身不做（8 张导出的非皮肤区都不变，doc/test_report_batch.md §2.1） | `color/develop.rs`、`tools/develop_fit.py` |
 | 输出编码（第三轮） | jpeg-encoder（量化正确舍入、4:4:4），默认 q98 与像素蛋糕导出的量化表一致；image 自带编码器的截断会吃掉 4–7% 的最细纹理 | `bin/retouch.rs` |

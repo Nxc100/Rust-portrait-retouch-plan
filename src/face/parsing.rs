@@ -70,24 +70,34 @@ impl ParseMap {
 
     /// 在原图 `w×h` 上生成给定类别集合的二值遮罩（最近邻），只在裁剪覆盖区域内非零。
     pub fn mask_of(&self, w: usize, h: usize, classes: &[u8]) -> GrayF32 {
+        self.mask_in(0, 0, w, h, classes)
+    }
+
+    /// 同 [`ParseMap::mask_of`]，但只生成原图矩形 `[x0, x0 + w) × [y0, y0 + h)` 这一块（输出 `w×h`）。
+    pub fn mask_in(&self, x0: usize, y0: usize, w: usize, h: usize, classes: &[u8]) -> GrayF32 {
         let mut m = GrayF32::new(w, h);
-        let (x0, y0, x1, y1) = self.bbox;
-        let (x0, y0) = (x0.max(0) as usize, y0.max(0) as usize);
-        let (x1, y1) = (
-            (x1.max(0) as usize).min(w.saturating_sub(1)),
-            (y1.max(0) as usize).min(h.saturating_sub(1)),
-        );
-        if x0 > x1 || y0 > y1 {
+        let (bx0, by0, bx1, by1) = self.bbox;
+        // 裁剪覆盖范围（含）与矩形的交，矩形坐标
+        let lo = |b: i32, o: usize| (b.max(0) as usize).saturating_sub(o);
+        let (cx0, cy0) = (lo(bx0, x0), lo(by0, y0));
+        let (cx1, cy1) = match (
+            (bx1.max(0) as usize).checked_sub(x0),
+            (by1.max(0) as usize).checked_sub(y0),
+        ) {
+            (Some(x1), Some(y1)) => (x1.min(w.saturating_sub(1)), y1.min(h.saturating_sub(1))),
+            _ => return m,
+        };
+        if w == 0 || h == 0 || cx0 > cx1 || cy0 > cy1 {
             return m;
         }
         use rayon::prelude::*;
-        m.data[y0 * w..(y1 + 1) * w]
+        m.data[cy0 * w..(cy1 + 1) * w]
             .par_chunks_mut(w)
             .enumerate()
             .for_each(|(dy, row)| {
-                let y = (y0 + dy) as f32 + 0.5;
-                for (x, v) in row.iter_mut().enumerate().take(x1 + 1).skip(x0) {
-                    let c = self.class_at(x as f32 + 0.5, y);
+                let y = (y0 + cy0 + dy) as f32 + 0.5;
+                for (x, v) in row.iter_mut().enumerate().take(cx1 + 1).skip(cx0) {
+                    let c = self.class_at((x0 + x) as f32 + 0.5, y);
                     if classes.contains(&c) {
                         *v = 1.0;
                     }
@@ -212,5 +222,57 @@ impl FaceParser {
             affine: m,
             bbox,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// 16×16 的类别图覆盖原图 [4, 36) × [2, 34)（每个类别像素对应原图 2×2），左半为脖子、右半为皮肤。
+    fn synthetic() -> ParseMap {
+        let size = 16;
+        let classes = (0..size * size)
+            .map(|i| if i % size < 8 { CLS_NECK } else { CLS_SKIN })
+            .collect();
+        ParseMap {
+            size,
+            classes,
+            affine: Affine {
+                a: 0.5,
+                b: 0.0,
+                c: -2.0,
+                d: 0.0,
+                e: 0.5,
+                f: -1.0,
+            },
+            bbox: (4, 2, 35, 33),
+        }
+    }
+
+    #[test]
+    fn mask_in_matches_the_same_window_of_mask_of() {
+        let pm = synthetic();
+        let (w, h) = (48, 40);
+        let full = pm.mask_of(w, h, &NECK_CLASSES);
+        assert!(full.data.iter().any(|v| *v > 0.0));
+        // 部分在覆盖范围外、部分在内的窗口，以及完全在外的窗口
+        for (x0, y0, cw, ch) in [
+            (0, 0, 48, 40),
+            (10, 5, 20, 30),
+            (30, 30, 18, 10),
+            (40, 36, 8, 4),
+        ] {
+            let part = pm.mask_in(x0, y0, cw, ch, &NECK_CLASSES);
+            for y in 0..ch {
+                for x in 0..cw {
+                    assert_eq!(
+                        part.get(x, y),
+                        full.get(x0 + x, y0 + y),
+                        "({x0},{y0}) + ({x},{y})"
+                    );
+                }
+            }
+        }
     }
 }

@@ -18,6 +18,7 @@ use crate::sync::lock;
 use crate::warp::face_warp::{FaceWarp, ReshapeStyle, WarpCoefficients, WarpParams};
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::sync::{Arc, Mutex, OnceLock};
 
 /// 磨皮模式。
@@ -449,6 +450,35 @@ pub fn apply_masked_lut(img: &mut ImgF32, op: &MaskedLutOp) {
         });
 }
 
+/// 奶油肌的底图：`pre` 带着这组人脸的 AI 瑕疵补丁且 `ai_blemish > 0` 时是修补后的原图，否则就是原图。
+fn cream_base<'a>(pre: &'a Precomp, faces: &[FaceKeyPoints], p: &RetouchParams) -> Cow<'a, ImgF32> {
+    if p.ai_blemish > 0.0 {
+        if let Some(pt) = pre.ai_patches(faces_key(faces)) {
+            if !pt.is_empty() {
+                return Cow::Owned(pt.apply_to(&pre.orig, p.ai_blemish));
+            }
+        }
+    }
+    Cow::Borrowed(&pre.orig)
+}
+
+/// 奶油肌颈纹淡化的处理权重（全图，0..1；调试 / 可视化用）：与 [`retouch_with`] 相同的人脸选择、参数与底图。
+/// 皮肤遮罩与 AI 补丁用 `pre` 当前带的（见 `Engine::neck_weights`）。
+pub fn cream_neck_weights(pre: &Precomp, faces: &[FaceKeyPoints], p: &RetouchParams) -> GrayF32 {
+    let faces_sel: Vec<FaceKeyPoints> = select_faces_indexed(faces)
+        .into_iter()
+        .map(|(_, f)| f.clone())
+        .collect();
+    if faces_sel.is_empty() {
+        return GrayF32::new(pre.orig.w, pre.orig.h);
+    }
+    let masks = pre.skin_masks(&faces_sel, p.body_skin);
+    let params: Vec<&CreamParams> = faces_sel.iter().map(|f| p.cream_for(f.gender)).collect();
+    let body_params = p.cream_female.as_ref().unwrap_or(&p.cream);
+    let base = cream_base(pre, faces, p);
+    skin::cream::neck_weights(&base, &masks, &faces_sel, &params, body_params)
+}
+
 /// 完整流水线（f32 输出）。
 pub fn retouch_with(pre: &Precomp, faces: &[FaceKeyPoints], p: &RetouchParams) -> ImgF32 {
     let orig = &pre.orig;
@@ -506,15 +536,7 @@ pub fn retouch_with(pre: &Precomp, faces: &[FaceKeyPoints], p: &RetouchParams) -
                     faces_sel.iter().map(|f| p.cream_for(f.gender)).collect();
                 let body_params = p.cream_female.as_ref().unwrap_or(&p.cream);
                 // AI 瑕疵祛除（先于经典流程；补丁只含被修改的像素）
-                let base: std::borrow::Cow<ImgF32> = match p.ai_blemish > 0.0 {
-                    true => match pre.ai_patches(faces_key(faces)) {
-                        Some(pt) if !pt.is_empty() => {
-                            std::borrow::Cow::Owned(pt.apply_to(orig, p.ai_blemish))
-                        }
-                        _ => std::borrow::Cow::Borrowed(orig),
-                    },
-                    false => std::borrow::Cow::Borrowed(orig),
-                };
+                let base = cream_base(pre, faces, p);
                 let mut o =
                     skin::cream::cream_skin(&base, &masks, &faces_sel, &params, body_params);
                 if strength < 1.0 {

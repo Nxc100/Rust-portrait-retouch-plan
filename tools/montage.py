@@ -27,7 +27,8 @@ def font(sz):
     return ImageFont.load_default()
 
 
-def montage(paths, labels, box, out, width=None):
+def montage(paths, labels, box, out, width=None, quality=None):
+    """`quality` 给出时按此质量存 JPEG（4:4:4，`out` 以 .jpg / .jpeg 结尾时）；否则按扩展名的默认方式保存。"""
     x0, y0, x1, y1 = box
     tiles = []
     for p in paths:
@@ -38,16 +39,21 @@ def montage(paths, labels, box, out, width=None):
             im = cv2.resize(im, (width, int(round(im.shape[0] * s))), interpolation=interp)
         tiles.append(im)
     h = max(t.shape[0] for t in tiles)
-    gap, head = 8, 44
+    # 标题字号随块宽放大（全图对比的块有一两千像素宽），不小于 26
+    size = max(26, min(t.shape[1] for t in tiles) // 32)
+    gap, head = 8, size + 18
     canvas = Image.new('RGB', (sum(t.shape[1] for t in tiles) + gap * (len(tiles) - 1), h + head), (255, 255, 255))
     d = ImageDraw.Draw(canvas)
-    f = font(26)
+    f = font(size)
     x = 0
     for t, lab in zip(tiles, labels):
         canvas.paste(Image.fromarray(t), (x, head))
-        d.text((x + 8, 8), lab, fill=(0, 0, 0), font=f)
+        d.text((x + 8, size // 3), lab, fill=(0, 0, 0), font=f)
         x += t.shape[1] + gap
-    canvas.save(out)
+    if quality and out.lower().endswith(('.jpg', '.jpeg')):
+        canvas.save(out, quality=quality, subsampling=0)
+    else:
+        canvas.save(out)
     print('saved', out, canvas.size)
 
 

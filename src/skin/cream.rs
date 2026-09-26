@@ -19,7 +19,12 @@
 //! 5. 色调：中间调提亮（钟形，随 L 远离中心衰减）、最高光压制（去油光）；低频色度向目标肤色按比例拉近
 //!    （偏黄偏红的皮肤降得多，白净的几乎不动），再加随亮度变化的 b 偏移（亮部 / 最高光 / 阴影）。
 //!    常数由 tools/skin_tone_fit.py 在 10 张照片、16 张脸上拟合；
-//! 6. 身体皮肤（颈胸臂手）用同样的三频段处理（参数独立）与更强的冷白偏移。
+//! 6. 身体皮肤（颈胸臂手）用同样的三频段处理（参数独立）；色调为随低频亮度变化的提亮（阴影到中间调是平台、
+//!    高光渐弱）与冷白偏移。色调只看低频亮度，不改变局部对比：按像素亮度提亮会把腋下、肘弯等暗褶纹加深。
+//!    色调参数按人：身体像素按到各张脸的距离软分配，混合各人（男女不同）的身体色调参数。
+//! 7. 颈纹淡化：每张脸的脖子（人脸解析的脖子类）上对去掉细颗粒的亮度做保边平滑，只处理局部能量中等、
+//!    不是异物的结构，再把颈纹的线芯与横过脖子的碎发（细长暗线）填平——项链、纹身、胡茬与轮廓不动（`neck.rs`）。
+//!    两张脸的解析范围可能盖到同一段脖子（贴脸、亲吻），脖子像素按与身体色调相同的归属规则分给各人，不重复处理。
 //!
 //! 所有步骤只在各自遮罩的包围盒内计算并乘以羽化遮罩，遮罩外像素逐位不变。
 
@@ -28,10 +33,12 @@ use crate::color::lab::LabPlanes;
 use crate::face::semantic::FaceKeyPoints;
 use crate::geom::P;
 use crate::skin::blemish::{detect_blemishes, detect_scale, inpaint_blobs, BlemishParams};
-use crate::skin::guided::{fast_gaussian, guided_filter};
+use crate::skin::guided::{fast_gaussian, guided_filter, masked_gaussian, subsample_for};
 use crate::skin::heal::{detect_lesions, heal_lesions, HealParams};
 use crate::skin::mask::fill_polygon;
 use crate::skin::masks::{bbox_of, crop_gray, paste_gray, SkinMasks};
+use crate::skin::neck::{self, NeckParams, NeckZone};
+use crate::skin::smoothstep;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
@@ -91,7 +98,11 @@ pub struct CreamParams {
     /// 眼部清晰：眼眶椭圆内的亮度局部对比增益 `L += k·(L − G(L; 0.04·瞳距))`（巩膜 / 高光更亮、
     /// 睫毛线与虹膜边缘更深）。像素蛋糕两张样张的眼区 L 标准差都变大（海边 +4–5%）
     pub eye_contrast: f32,
-    /// 身体皮肤：中频衰减、低中频衰减、半径（× ed_mean）、细颗粒衰减、提亮、降红、降黄、色度匀肤
+    /// 身体皮肤：中频衰减、低中频衰减、半径（× ed_mean）、细颗粒衰减、提亮、降红、降黄、色度匀肤。
+    /// 提亮 `body_lift` 是阴影到中间调的平台值（L），随低频亮度的形状见 `body_lift_weight`；
+    /// 降黄是低频黄度 b 按比例 `body_pull_b` 向 `body_target_b` 拉近（偏黄的降得多，天光下偏蓝的皮肤略加暖），
+    /// 另加偏移 `body_yellow`，都随低频亮度从 L 30 到 60 线性加满。提亮 / 降红 / 降黄按人取值：身体像素按到
+    /// 各张脸的距离混合各人的参数（见 `body_tone_at`），其余身体参数取自调用方给的 `body_params`
     pub body_smooth: f32,
     pub body_low_smooth: f32,
     pub body_radius: f32,
@@ -99,6 +110,10 @@ pub struct CreamParams {
     pub body_lift: f32,
     pub body_redness: f32,
     pub body_yellow: f32,
+    /// 预设文件里没有这一项（0.6.3 之前导出）时为 0：保持文件里原来的常数降黄 `body_yellow`
+    #[serde(default)]
+    pub body_pull_b: f32,
+    pub body_target_b: f32,
     pub body_chroma_smooth: f32,
     /// 小瑕疵祛除
     pub blemish: BlemishParams,
@@ -106,6 +121,8 @@ pub struct CreamParams {
     /// 大尺度瑕疵修复（脸 / 身体）
     pub heal: HealParams,
     pub body_heal: HealParams,
+    /// 颈纹淡化（脖子区域，见 `skin::neck`）
+    pub neck: NeckParams,
 }
 
 impl Default for CreamParams {
@@ -144,14 +161,19 @@ impl Default for CreamParams {
             body_low_smooth: 0.25,
             body_radius: 0.05,
             body_fine_smooth: 0.25,
-            body_lift: 2.4,
-            body_redness: -0.5,
-            body_yellow: -2.2,
+            body_lift: 4.6,
+            body_redness: -0.85,
+            // 像素蛋糕的女性身体：黄度按 0.19 的比例向 b 1.3 拉近（b −1.5 → +1.9，b 21 → −3.6；
+            // tools/body_tone_fit.py，7 张照片，残差 RMS 1.51 → 0.78）
+            body_yellow: 0.0,
+            body_pull_b: 0.19,
+            body_target_b: 1.3,
             body_chroma_smooth: 0.35,
             blemish: BlemishParams::default(),
             body_blemish: true,
             heal: HealParams::default(),
             body_heal: HealParams::body_default(),
+            neck: NeckParams::default(),
         }
     }
 }
@@ -186,6 +208,12 @@ impl CreamParams {
             yellow_highlight: 1.46,
             yellow_shadow: 0.67,
             eye_contrast: 0.25,
+            // 像素蛋糕对新郎的脖子、手只轻度提亮与降黄（tools/body_tone_fit.py：lift 2.6、a −0.6、b −1.1）；
+            // 男性身体的降黄量与黄度几乎无关（比例拟合 pull 0.04，残差与常数相同），用常数偏移
+            body_lift: 2.6,
+            body_redness: -0.6,
+            body_yellow: -1.1,
+            body_pull_b: 0.0,
             blemish: BlemishParams {
                 dark_contrast: 3.4,
                 red_contrast: 3.6,
@@ -327,6 +355,109 @@ struct Region<'a> {
     geom: Option<FaceGeom>,
     /// 语义皮肤概率（ROI 分辨率）；身体区域的瑕疵 / 疤痕检测只在语义上是皮肤的像素上进行
     skin_prob: Option<&'a GrayF32>,
+    /// 身体色调的各人来源（ROI 坐标）；为空时用 `params` 的身体色调
+    body_tones: &'a [BodyTone],
+}
+
+/// 身体色调：提亮、降红、降黄偏移、降黄的拉力与"拉力 × 目标黄度"。黄度改变量 `yellow + pull_target − pull_b·b`
+/// 对各项是线性的，按人混合时直接对各项加权即可。
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct Tone {
+    lift: f32,
+    redness: f32,
+    yellow: f32,
+    pull_b: f32,
+    pull_target: f32,
+}
+
+impl Tone {
+    fn of(p: &CreamParams) -> Self {
+        Self {
+            lift: p.body_lift,
+            redness: p.body_redness,
+            yellow: p.body_yellow,
+            pull_b: p.body_pull_b,
+            pull_target: p.body_pull_b * p.body_target_b,
+        }
+    }
+
+    /// 低频黄度为 `b` 时 b 的改变量（未乘亮度权重）。
+    fn yellow_at(&self, b: f32) -> f32 {
+        self.yellow + self.pull_target - self.pull_b * b
+    }
+
+    /// `self + w · o`（逐项）。
+    fn add_scaled(self, o: &Tone, w: f32) -> Self {
+        Self {
+            lift: self.lift + w * o.lift,
+            redness: self.redness + w * o.redness,
+            yellow: self.yellow + w * o.yellow,
+            pull_b: self.pull_b + w * o.pull_b,
+            pull_target: self.pull_target + w * o.pull_target,
+        }
+    }
+}
+
+/// 一个人的身体色调：以其脸中心与尺度定位，身体像素按距离软分配（见 [`body_tone_at`]）。
+#[derive(Clone, Copy, Debug)]
+struct BodyTone {
+    center: P,
+    /// 脸的尺度（`FaceKeyPoints::scale_distance`）
+    scale: f32,
+    tone: Tone,
+}
+
+impl BodyTone {
+    fn of(params: &CreamParams, center: P, scale: f32) -> Self {
+        Self {
+            center,
+            scale: scale.max(1.0),
+            tone: Tone::of(params),
+        }
+    }
+}
+
+/// 身体像素的归属：到各脸中心的距离以该脸尺度为单位，权重 ∝ exp(−(d − d_min) / 软度)。
+/// 软度 0.5：自己身上（距离差 ≥ 1.5 个脸尺度）的权重 > 95%，两人之间几个脸尺度内平滑过渡，不出现接缝
+const BODY_OWNER_SOFTNESS: f32 = 0.5;
+
+/// 归属权重（未归一化）：`d` 为到某人脸中心的距离、`d_min` 为到最近那张脸的距离，都以脸尺度为单位。
+fn owner_weight(d: f32, d_min: f32) -> f32 {
+    (-(d - d_min) / BODY_OWNER_SOFTNESS).exp()
+}
+
+/// `pos` 属于第 `k` 个人的份额（0..1，各人之和为 1）：`anchors` 为各人的（中心，尺度），归属规则同 [`body_tone_at`]。
+fn owner_share(anchors: &[(P, f32)], pos: P, k: usize) -> f32 {
+    let dist = |&(c, s): &(P, f32)| pos.dist(c) / s;
+    let d_min = anchors.iter().map(dist).fold(f32::INFINITY, f32::min);
+    let weight = |a: &(P, f32)| owner_weight(dist(a), d_min);
+    weight(&anchors[k]) / anchors.iter().map(weight).sum::<f32>()
+}
+
+/// 某个身体像素的色调：各人参数按归属权重混合；没有来源时用 `fallback`。逐像素调用，
+/// 权重现算两遍（求和、混合）而不存起来，省掉每个像素一次的内存分配。
+fn body_tone_at(tones: &[BodyTone], pos: P, fallback: Tone) -> Tone {
+    let dist = |t: &BodyTone| pos.dist(t.center) / t.scale;
+    let d_min = tones.iter().map(dist).fold(f32::INFINITY, f32::min);
+    if !d_min.is_finite() {
+        return fallback;
+    }
+    let weight = |t: &BodyTone| owner_weight(dist(t), d_min);
+    let sw: f32 = tones.iter().map(weight).sum();
+    tones.iter().fold(Tone::default(), |acc, t| {
+        acc.add_scaled(&t.tone, weight(t) / sw)
+    })
+}
+
+/// 各人的身体色调都相同（只有一个人、或同性别）时的常数色调，省掉逐像素的归属计算；没有来源时为 `fallback`。
+fn uniform_body_tone(tones: &[BodyTone], fallback: Tone) -> Option<Tone> {
+    match tones.split_first() {
+        None => Some(fallback),
+        Some((first, rest)) => rest
+            .iter()
+            .all(|t| t.tone == first.tone)
+            .then_some(first.tone),
+    }
 }
 
 fn crop_img(src: &ImgF32, x0: usize, y0: usize, cw: usize, ch: usize) -> ImgF32 {
@@ -365,16 +496,6 @@ fn weighted_percentile(values: &[f32], weights: &[f32], q: f32) -> f32 {
     100.0
 }
 
-fn subsample_for(rad: usize) -> usize {
-    if rad >= 8 {
-        4
-    } else if rad >= 3 {
-        2
-    } else {
-        1
-    }
-}
-
 /// 纹理 / 轮廓处（高能量）中频也保留少量衰减：像素蛋糕在高能量箱的中频比约 0.94–0.97，不是 1。
 const KEEP_MAX: f32 = 0.92;
 /// 色调环节"向目标色拉"所用低频色度的尺度（× 瞳距当量），与 tools/skin_tone_fit.py 一致
@@ -386,6 +507,34 @@ const BODY_CLUTTER_MIN_PEAK: f32 = 1.5;
 /// 身体瑕疵检测的语义皮肤门控：概率在 LO..HI 之间线性过渡
 const SEMANTIC_SKIN_LO: f32 = 0.45;
 const SEMANTIC_SKIN_HI: f32 = 0.75;
+
+/// 语义皮肤门控：皮肤分割概率 → 0..1（纹身墨迹、首饰、衣褶为 0）。
+fn semantic_skin_gate(p: f32) -> f32 {
+    ((p - SEMANTIC_SKIN_LO) / (SEMANTIC_SKIN_HI - SEMANTIC_SKIN_LO)).clamp(0.0, 1.0)
+}
+/// 身体提亮随低频亮度的形状（tools/body_tone_fit.py 在 7 张照片的身体皮肤上拟合像素蛋糕「奶油肌」）：
+/// 阴影到中间调是平台（L 20 以下减到平台的 `SHADOW_KEEP`，20→44 回到平台），高光 L 64→88 平滑降到平台的
+/// `HIGHLIGHT_KEEP`。像素蛋糕对暗部（腋下、手臂背光面）提得和中间调一样多，对高光（肩头、手背）提得少
+const BODY_LIFT_SHADOW_L: (f32, f32) = (20.0, 44.0);
+const BODY_LIFT_SHADOW_KEEP: f32 = 0.8;
+const BODY_LIFT_FADE_L: (f32, f32) = (64.0, 88.0);
+const BODY_LIFT_HIGHLIGHT_KEEP: f32 = 0.1;
+/// 身体降黄随低频亮度加满的区间（L）
+const BODY_YELLOW_L: (f32, f32) = (30.0, 60.0);
+
+/// 身体提亮的权重（0..1），`l` 为低频亮度（Lab L）。
+fn body_lift_weight(l: f32) -> f32 {
+    let (s0, s1) = BODY_LIFT_SHADOW_L;
+    let (f0, f1) = BODY_LIFT_FADE_L;
+    let shadow = BODY_LIFT_SHADOW_KEEP + (1.0 - BODY_LIFT_SHADOW_KEEP) * smoothstep(s0, s1, l);
+    shadow * (1.0 - (1.0 - BODY_LIFT_HIGHLIGHT_KEEP) * smoothstep(f0, f1, l))
+}
+
+/// 身体降黄的权重（0..1），`l` 为低频亮度。
+fn body_yellow_weight(l: f32) -> f32 {
+    let (y0, y1) = BODY_YELLOW_L;
+    ((l - y0) / (y1 - y0)).clamp(0.0, 1.0)
+}
 
 /// 在区域遮罩的包围盒内处理三平面。
 fn process_region(planes: &mut LabPlanes, r: &Region, timing: bool) {
@@ -455,10 +604,10 @@ fn process_region(planes: &mut LabPlanes, r: &Region, timing: bool) {
             // 概率 0.36，周围皮肤 0.996），而 800 px 输入分辨率下几个像素的斑点仍是皮肤
             let mut e = m.clone();
             if let Some(sp) = r.skin_prob {
-                e.data.par_iter_mut().zip(&sp.data).for_each(|(v, p)| {
-                    *v *= ((*p - SEMANTIC_SKIN_LO) / (SEMANTIC_SKIN_HI - SEMANTIC_SKIN_LO))
-                        .clamp(0.0, 1.0);
-                });
+                e.data
+                    .par_iter_mut()
+                    .zip(&sp.data)
+                    .for_each(|(v, p)| *v *= semantic_skin_gate(*p));
             }
             e
         }
@@ -695,21 +844,37 @@ fn process_region(planes: &mut LabPlanes, r: &Region, timing: bool) {
                     * mk;
             });
     } else {
-        let (lift, red, yel) = (p.body_lift, p.body_redness, p.body_yellow);
+        // 权重只看低频亮度：同一块皮肤上的暗褶纹与周围提得一样多，局部对比不变
+        // （按像素亮度提亮时，L 30–60 的斜率 1 + lift/30 会把腋下、肘弯的褶纹加深约 8%）
+        // 黄度同样只看遮罩内的低频黄度：降黄随皮肤本身的黄度而定，不随局部起伏
+        let fallback = Tone::of(p);
+        let uniform = uniform_body_tone(r.body_tones, fallback);
+        let origin = P::new(bx0 as f32, by0 as f32);
+        let sigma = (TONE_LOWPASS * ed).max(1.0);
+        let low_l = masked_gaussian(&sub.l, &m, sigma);
+        let low_b = masked_gaussian(&sub.b, &m, sigma);
         sub.l
             .data
             .par_iter_mut()
             .zip(sub.a.data.par_iter_mut())
             .zip(sub.b.data.par_iter_mut())
-            .zip(&m.data)
-            .for_each(|(((l, a), b), mk)| {
+            .zip(
+                m.data
+                    .par_iter()
+                    .zip(low_l.data.par_iter().zip(&low_b.data)),
+            )
+            .enumerate()
+            .for_each(|(i, (((l, a), b), (mk, (ll, lb))))| {
                 if *mk <= 0.0 {
                     return;
                 }
-                let t = ((*l - 30.0) / 30.0).clamp(0.0, 1.0);
-                *l += lift * t * mk;
-                *a += red * mk;
-                *b += yel * t * mk;
+                let tone = uniform.unwrap_or_else(|| {
+                    let pos = origin.add(P::new((i % bw) as f32, (i / bw) as f32));
+                    body_tone_at(r.body_tones, pos, fallback)
+                });
+                *l += tone.lift * body_lift_weight(*ll) * mk;
+                *a += tone.redness * mk;
+                *b += tone.yellow_at(*lb) * body_yellow_weight(*ll) * mk;
             });
     }
     if timing {
@@ -759,8 +924,114 @@ fn process_region(planes: &mut LabPlanes, r: &Region, timing: bool) {
     paste_gray(&mut planes.b, &sub.b, bx0, by0);
 }
 
+/// 各张脸的脖子区域（需要人脸解析；颈纹强度为 0 的脸跳过）。`planes` 为处理前的区域 Lab，
+/// `body` / `skin_prob` 为区域坐标的身体遮罩与语义皮肤概率，`people[i]` 为第 i 张脸的参数与尺度。
+/// 脖子像素按归属份额（[`owner_share`]，以各张脸的中心与尺度计）分给各人：贴脸、亲吻时一张脸的解析范围会盖到
+/// 另一个人的脖子，按份额分摊后每个像素合计只处理一次，并用它主人的参数与尺度。
+fn neck_zones(
+    planes: &LabPlanes,
+    origin: (usize, usize),
+    body: &GrayF32,
+    skin_prob: Option<&GrayF32>,
+    faces: &[FaceKeyPoints],
+    people: &[(&CreamParams, f32)],
+) -> Vec<(usize, NeckZone)> {
+    let off = P::new(origin.0 as f32, origin.1 as f32);
+    let anchors: Vec<(P, f32)> = faces
+        .iter()
+        .zip(people)
+        .map(|(f, &(_, ed))| (face_center(f).sub(off), ed.max(1.0)))
+        .collect();
+    faces
+        .iter()
+        .zip(people)
+        .enumerate()
+        .filter_map(|(i, (f, &(p, ed)))| {
+            if p.neck.strength <= 0.0 {
+                return None;
+            }
+            let parse = f.parse.as_ref()?;
+            let rect = neck::parse_rect(parse, origin, (planes.w, planes.h))?;
+            let mut allowed = crop_gray(body, rect.x0, rect.y0, rect.w, rect.h);
+            let sp = skin_prob.map(|sp| crop_gray(sp, rect.x0, rect.y0, rect.w, rect.h));
+            let shared = anchors.len() > 1;
+            allowed.data.par_iter_mut().enumerate().for_each(|(j, a)| {
+                if let Some(sp) = &sp {
+                    *a *= semantic_skin_gate(sp.data[j]);
+                }
+                if shared && *a > 0.0 {
+                    let pos = P::new((rect.x0 + j % rect.w) as f32, (rect.y0 + j / rect.w) as f32);
+                    *a *= owner_share(&anchors, pos, i);
+                }
+            });
+            neck::neck_zone(parse, origin, rect, planes, &allowed, ed, &p.neck).map(|z| (i, z))
+        })
+        .collect()
+}
+
+/// 人脸框的中心（全图坐标）。
+fn face_center(f: &FaceKeyPoints) -> P {
+    P::new((f.bbox.x1 + f.bbox.x2) * 0.5, (f.bbox.y1 + f.bbox.y2) * 0.5)
+}
+
+/// 各张脸的纹理尺度：姿态稳健的 `scale_distance`（侧脸时瞳距偏小会把频段整体移到过细的尺度）。
+fn face_scales(faces: &[FaceKeyPoints]) -> Vec<f32> {
+    faces.iter().map(|f| f.scale_distance().max(8.0)).collect()
+}
+
+/// 第 i 张脸的参数与尺度（参数缺省时用身体参数）。
+fn people_of<'a>(
+    face_eds: &[f32],
+    face_params: &[&'a CreamParams],
+    body_params: &'a CreamParams,
+) -> Vec<(&'a CreamParams, f32)> {
+    face_eds
+        .iter()
+        .enumerate()
+        .map(|(i, &ed)| (face_params.get(i).copied().unwrap_or(body_params), ed))
+        .collect()
+}
+
+/// 颈纹淡化的处理权重（全图坐标，0..1；调试 / 可视化用，与 [`cream_skin`] 的区域一致）。
+pub fn neck_weights(
+    orig: &ImgF32,
+    masks: &SkinMasks,
+    faces: &[FaceKeyPoints],
+    face_params: &[&CreamParams],
+    body_params: &CreamParams,
+) -> GrayF32 {
+    let mut out = GrayF32::new(orig.w, orig.h);
+    let (Some((x0, y0, x1, y1)), Some(body)) = (masks.roi, masks.body.as_ref()) else {
+        return out;
+    };
+    let (cw, ch) = (x1 - x0, y1 - y0);
+    if cw == 0 || ch == 0 {
+        return out;
+    }
+    let planes = LabPlanes::from_img(&crop_img(orig, x0, y0, cw, ch));
+    let body = crop_gray(body, x0, y0, cw, ch);
+    let skin_prob = masks
+        .skin_prob
+        .as_ref()
+        .map(|sp| crop_gray(sp, x0, y0, cw, ch));
+    let face_eds = face_scales(faces);
+    let people = people_of(&face_eds, face_params, body_params);
+    for (_, z) in neck_zones(&planes, (x0, y0), &body, skin_prob.as_ref(), faces, &people) {
+        let (zx, zy) = (x0 + z.rect.x0, y0 + z.rect.y0);
+        for y in 0..z.rect.h {
+            for x in 0..z.rect.w {
+                let o = &mut out.data[(zy + y) * orig.w + zx + x];
+                *o = o.max(z.weight.data[y * z.rect.w + x]);
+            }
+        }
+    }
+    out
+}
+
 /// 应用奶油肌。`faces[i]`（全图坐标）给出第 i 张脸的关键点（瞳距、眼下区域、五官保护区），
 /// `face_params[i]` 给出其参数（可按性别不同）。`faces` 可少于遮罩数（缺省用平均瞳距、无保护区）。
+/// 身体区域用 `body_params` 处理，其中色调（提亮 / 降红 / 降黄）按像素归属混合 `face_params` 各人的身体色调；
+/// 每张脸的脖子再按该脸的参数做颈纹淡化（需要人脸解析与身体遮罩）。
 pub fn cream_skin(
     orig: &ImgF32,
     masks: &SkinMasks,
@@ -786,9 +1057,8 @@ pub fn cream_skin(
             t.elapsed().as_secs_f64() * 1e3
         );
     }
-    // 纹理 / 瑕疵的尺度用姿态稳健的脸部尺度（侧脸时瞳距偏小会把频段整体移到过细的尺度）；
-    // 眼周等保护区的几何仍按真实瞳距（FaceGeom.ed）
-    let face_eds: Vec<f32> = faces.iter().map(|f| f.scale_distance().max(8.0)).collect();
+    // 纹理 / 瑕疵的尺度用姿态稳健的脸部尺度；眼周等保护区的几何仍按真实瞳距（FaceGeom.ed）
+    let face_eds = face_scales(faces);
     let ed_mean = if face_eds.is_empty() {
         (orig.w.min(orig.h) as f32) * 0.06
     } else {
@@ -799,6 +1069,15 @@ pub fn cream_skin(
         .skin_prob
         .as_ref()
         .map(|sp| crop_gray(sp, x0, y0, cw, ch));
+    let body_mask = masks.body.as_ref().map(|b| crop_gray(b, x0, y0, cw, ch));
+    let people = people_of(&face_eds, face_params, body_params);
+    // 颈纹：脖子区域（异物门控、细线）在处理前的颜色上确定，身体处理完后再平滑、填平
+    let t = Instant::now();
+    let necks = match &body_mask {
+        Some(b) => neck_zones(&planes, (x0, y0), b, skin_prob.as_ref(), faces, &people),
+        None => Vec::new(),
+    };
+    let neck_zones_ms = t.elapsed().as_secs_f64() * 1e3;
     for (i, fm) in masks.faces.iter().enumerate() {
         let m = crop_gray(fm, x0, y0, cw, ch);
         let params = face_params.get(i).copied().unwrap_or(body_params);
@@ -811,23 +1090,43 @@ pub fn cream_skin(
                 is_face: true,
                 geom: faces.get(i).map(|f| FaceGeom::from_face(f, off)),
                 skin_prob: skin_prob.as_ref(),
+                body_tones: &[],
             },
             timing,
         );
     }
-    if let Some(b) = &masks.body {
-        let m = crop_gray(b, x0, y0, cw, ch);
+    if let Some(m) = &body_mask {
+        let body_tones: Vec<BodyTone> = faces
+            .iter()
+            .zip(&people)
+            .map(|(f, &(params, scale))| BodyTone::of(params, face_center(f).sub(off), scale))
+            .collect();
         process_region(
             &mut planes,
             &Region {
-                mask: &m,
+                mask: m,
                 ed: ed_mean,
                 params: body_params,
                 is_face: false,
                 geom: None,
                 skin_prob: skin_prob.as_ref(),
+                body_tones: &body_tones,
             },
             timing,
+        );
+    }
+    let t = Instant::now();
+    for (i, zone) in &necks {
+        let (p, ed) = people[*i];
+        let fine = (p.fine_sigma * ed).max(FINE_SIGMA_FLOOR_PX);
+        neck::soften_neck(&mut planes.l, zone, ed, &p.neck, fine, p.mid_sigma * ed);
+    }
+    if timing && !necks.is_empty() {
+        eprintln!(
+            "  [cream/neck] {} zone(s): zones {:.0} ms, smoothing {:.0} ms",
+            necks.len(),
+            neck_zones_ms,
+            t.elapsed().as_secs_f64() * 1e3
         );
     }
     let t = Instant::now();
@@ -904,5 +1203,158 @@ mod tests {
             var(&out),
             var(&img)
         );
+    }
+
+    #[test]
+    fn body_lift_is_flat_in_shadows_and_fades_in_highlights() {
+        // 阴影与中间调提得一样多（腋下、背光面不比周围暗），高光渐弱
+        assert!((body_lift_weight(50.0) - 1.0).abs() < 1e-6);
+        assert!((body_lift_weight(62.0) - 1.0).abs() < 1e-6);
+        assert!(body_lift_weight(40.0) > 0.95);
+        assert!(body_lift_weight(10.0) >= BODY_LIFT_SHADOW_KEEP - 1e-6);
+        assert!((body_lift_weight(95.0) - BODY_LIFT_HIGHLIGHT_KEEP).abs() < 1e-6);
+        let mut prev = f32::INFINITY;
+        for l in (44..=100).step_by(4) {
+            let w = body_lift_weight(l as f32);
+            assert!(w <= prev + 1e-6, "non-increasing above the shadows");
+            prev = w;
+        }
+    }
+
+    #[test]
+    fn body_tone_does_not_deepen_dark_folds() {
+        // 暗部皮肤上的细褶纹（2 px 暗 / 2 px 亮的条纹）：只做身体色调时整体提亮，但褶纹的明暗差不变
+        let (w, h) = (400, 300);
+        let mut img = ImgF32::new(w, h);
+        for (i, p) in img.data.iter_mut().enumerate() {
+            let v = if (i % w / 2) % 2 == 0 { 0.30 } else { 0.40 };
+            *p = [v * 1.10, v, v * 0.90];
+        }
+        let mut body = GrayF32::new(w, h);
+        for y in 40..260 {
+            for x in 40..360 {
+                body.data[y * w + x] = 1.0;
+            }
+        }
+        let masks = SkinMasks {
+            faces: vec![],
+            body: Some(body.clone()),
+            union: body,
+            roi: Some((0, 0, w, h)),
+            skin_prob: None,
+        };
+        let mut p = CreamParams {
+            body_smooth: 0.0,
+            body_low_smooth: 0.0,
+            body_fine_smooth: 0.0,
+            body_chroma_smooth: 0.0,
+            body_blemish: false,
+            ..CreamParams::default()
+        };
+        p.body_heal.strength = 0.0;
+        // 一张脸只用来给出尺度（瞳距 200 → 低频 σ 6 px，远大于条纹周期）与身体色调的归属
+        let face = FaceKeyPoints {
+            pupil_l: P::new(100.0, 20.0),
+            pupil_r: P::new(300.0, 20.0),
+            nose_bridge_top: P::new(200.0, 20.0),
+            chin: P::new(200.0, 60.0),
+            ..Default::default()
+        };
+        let out = cream_skin(&img, &masks, &[face], &[&p], &p);
+        let stripes = |im: &ImgF32| {
+            let lab = LabPlanes::from_img(im);
+            let (mut dark, mut bright, mut n) = (0.0f32, 0.0f32, 0.0f32);
+            for y in 100..200 {
+                for x in (100..300).step_by(4) {
+                    dark += lab.l.data[y * w + x];
+                    bright += lab.l.data[y * w + x + 2];
+                    n += 1.0;
+                }
+            }
+            (dark / n, bright / n)
+        };
+        let (d0, b0) = stripes(&img);
+        let (d1, b1) = stripes(&out);
+        assert!(
+            d1 - d0 > 0.9 * p.body_lift,
+            "dark folds lifted like their surroundings: {d0} → {d1}"
+        );
+        let (c0, c1) = (b0 - d0, b1 - d1);
+        assert!(
+            (c1 - c0).abs() < 0.02 * c0,
+            "fold contrast unchanged: {c0} → {c1}"
+        );
+    }
+
+    #[test]
+    fn body_tone_follows_the_nearest_person() {
+        let her = BodyTone::of(&CreamParams::default(), P::new(0.0, 0.0), 100.0);
+        let him = BodyTone::of(&CreamParams::male_default(), P::new(1000.0, 0.0), 100.0);
+        let fallback = Tone {
+            lift: 1.0,
+            ..Tone::default()
+        };
+        assert_eq!(body_tone_at(&[], P::new(5.0, 5.0), fallback), fallback);
+        let near_her = body_tone_at(&[her, him], P::new(150.0, 200.0), fallback);
+        assert!((near_her.lift - her.tone.lift).abs() < 0.01, "{near_her:?}");
+        let near_him = body_tone_at(&[her, him], P::new(900.0, 300.0), fallback);
+        assert!((near_him.lift - him.tone.lift).abs() < 0.01, "{near_him:?}");
+        // 两人中间平滑过渡：各项取平均，黄度改变量也是两人的平均
+        let mid = body_tone_at(&[her, him], P::new(500.0, 0.0), fallback);
+        assert!(
+            (mid.lift - 0.5 * (her.tone.lift + him.tone.lift)).abs() < 1e-3,
+            "{mid:?}"
+        );
+        for b in [0.0, 10.0, 20.0] {
+            let avg = 0.5 * (her.tone.yellow_at(b) + him.tone.yellow_at(b));
+            assert!((mid.yellow_at(b) - avg).abs() < 1e-3, "b {b}: {mid:?}");
+        }
+        // 参数相同（或没有来源）时是常数，不必逐像素计算
+        assert_eq!(uniform_body_tone(&[], fallback), Some(fallback));
+        assert_eq!(uniform_body_tone(&[her, her], fallback), Some(her.tone));
+        assert_eq!(uniform_body_tone(&[her, him], fallback), None);
+    }
+
+    #[test]
+    fn body_yellow_pulls_towards_the_target() {
+        // 女性：偏黄的皮肤降黄，偏蓝的（天光下）略加暖，目标黄度处只剩偏移；男性：常数偏移
+        let her = Tone::of(&CreamParams::default());
+        let p = CreamParams::default();
+        assert!((her.yellow_at(p.body_target_b) - p.body_yellow).abs() < 1e-5);
+        assert!(her.yellow_at(20.0) < -3.0 && her.yellow_at(-2.0) > 0.5);
+        let him = Tone::of(&CreamParams::male_default());
+        assert_eq!(him.yellow_at(0.0), him.yellow_at(20.0));
+    }
+
+    #[test]
+    fn presets_without_the_body_pull_keep_their_constant_yellow() {
+        // 0.6.3 之前导出的预设没有 body_pull_b：只用文件里的常数降黄，不再叠加默认的比例降黄
+        let old: CreamParams = serde_json::from_str(r#"{"body_yellow": -2.2}"#).unwrap();
+        assert_eq!(old.body_pull_b, 0.0);
+        assert_eq!(Tone::of(&old).yellow_at(15.0), -2.2);
+        // 新导出的预设写出了这一项，读回不变
+        let p = CreamParams::default();
+        let back: CreamParams = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
+        assert_eq!(back.body_pull_b, p.body_pull_b);
+    }
+
+    #[test]
+    fn owner_share_splits_between_people_and_sums_to_one() {
+        let anchors = [(P::new(0.0, 0.0), 100.0), (P::new(1000.0, 0.0), 100.0)];
+        let at = |x: f32, y: f32| {
+            let pos = P::new(x, y);
+            (owner_share(&anchors, pos, 0), owner_share(&anchors, pos, 1))
+        };
+        // 自己的脖子（脸下方）几乎全归自己；两人正中各半；份额之和为 1
+        let (a, b) = at(80.0, 250.0);
+        assert!(a > 0.999 && b < 0.001, "{a} {b}");
+        let (a, b) = at(500.0, 300.0);
+        assert!((a - 0.5).abs() < 1e-5 && (b - 0.5).abs() < 1e-5, "{a} {b}");
+        for x in [0.0, 300.0, 480.0, 520.0, 900.0] {
+            let (a, b) = at(x, 120.0);
+            assert!((a + b - 1.0).abs() < 1e-5, "{x}: {a} + {b}");
+        }
+        // 只有一个人时全归他
+        assert_eq!(owner_share(&anchors[..1], P::new(700.0, 0.0), 0), 1.0);
     }
 }

@@ -133,7 +133,7 @@ fn segment_peaks(
     let low: Vec<u8> = resp.iter().map(|v| (*v >= 0.5) as u8).collect();
     let max_area_low = (p.max_area_low_factor.max(1.0) * max_area as f32) as usize;
     let mut allowed = vec![false; w * h];
-    for c in crate::skin::heal::components(&low, w, h, max_area_low) {
+    for c in crate::skin::morph::components(&low, w, h, max_area_low) {
         let area = c.pixels.len();
         let bw = (c.x1 - c.x0 + 1) as f32;
         let bh = (c.y1 - c.y0 + 1) as f32;

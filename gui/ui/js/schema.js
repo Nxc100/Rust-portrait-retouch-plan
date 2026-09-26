@@ -56,7 +56,7 @@ export const GROUPS = [
     fields: [
       {
         key: 'body_skin', type: 'toggle', label: '处理身体皮肤',
-        hint: '脖颈、胸口、手臂、手：磨皮、匀肤、祛瑕疵（需要人像抠图 / 皮肤分割模型）',
+        hint: '脖颈、胸口、手臂、手：磨皮、匀肤、祛瑕疵；脖子再淡化颈纹（需要人像抠图 / 皮肤分割模型）',
       },
       {
         key: 'ai_blemish', type: 'toggle', label: 'AI 瑕疵祛除',
