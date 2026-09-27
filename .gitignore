@@ -4,9 +4,15 @@
 /runtime/*.so
 /runtime/*.dylib
 /example/
-# 测试产物不入库，只收录两批样张的完整对比图（tools/sample_montages.py compare_all）
+# 测试产物不入库，只收录两批样张的完整对比图（tools/sample_montages.py compare_all）与最终对照组的对比图、分析
+# （tools/sample_montages.py final；全尺寸的批处理输出不入库）
 /out/*
 !/out/对比图/
+!/out/最终对照组/
+/out/最终对照组/*
+!/out/最终对照组/对比图/
+!/out/最终对照组/分析/
+!/out/最终对照组/README.md
 /tests/golden/
 /tests/samples/
 *.log
