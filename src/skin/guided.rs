@@ -4,7 +4,7 @@
 //! 导向滤波是奶油肌模式的核心：以亮度为引导，对亮度 / 色度做保边平滑，
 //! 在皮肤内压平毛孔与色斑而不越过五官、发际线等强边缘（无双边滤波的"梯度反转"光晕）。
 
-use crate::buffer::GrayF32;
+use crate::buffer::{GrayF32, ImgF32};
 use rayon::prelude::*;
 
 /// 转置。
@@ -172,6 +172,26 @@ pub fn guided_filter(
         .map(|((a, b), g)| a * g + b)
         .collect();
     GrayF32::from_vec(w, h, data)
+}
+
+/// RGB 的保边底图：以 Rec.709 亮度（sRGB 值上）为引导逐通道导向滤波（半径 r，eps 为局部方差门限）。
+/// 大于半径的明暗结构留在底图里，纹理与细节留在 `img − 底图`；颜色调整作用在底图上、细节原样加回，
+/// 就是不压缩也不放大纹理的"局部"调整（`color::develop` 的高光 / 阴影、`color::grade` 的黑点）。
+pub fn edge_aware_base(img: &ImgF32, r: usize, eps: f32) -> ImgF32 {
+    let plane = |f: &(dyn Fn(&[f32; 3]) -> f32 + Sync)| {
+        GrayF32::from_vec(img.w, img.h, img.data.par_iter().map(f).collect())
+    };
+    let guide = plane(&|p| 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]);
+    let sub = (r / 4).clamp(1, 4);
+    let ch: Vec<GrayF32> = (0..3)
+        .map(|c| guided_filter(&plane(&|p| p[c]), &guide, r, eps, sub))
+        .collect();
+    let mut out = ImgF32::new(img.w, img.h);
+    out.data
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(i, o)| *o = [ch[0].data[i], ch[1].data[i], ch[2].data[i]]);
+    out
 }
 
 #[cfg(test)]

@@ -113,7 +113,8 @@ enum StyleArg {
 
 #[derive(Args, Clone)]
 struct ParamArgs {
-    /// 预设：内置名（cream | cream_skin | 奶油肌）或 JSON 文件路径；指定后其余滑块参数以预设为准
+    /// 预设：内置名（奶油肌：cream | cream_skin | 奶油肌；婚纱-深色内景：wedding_dark_interior | 婚纱-深色内景）
+    /// 或 JSON 文件路径；指定后其余滑块参数以预设为准
     #[arg(long)]
     preset: Option<String>,
     /// 覆盖预设中的字段：`key.sub=value`，可重复（如 --set cream_female.detail_smooth=0.5）
@@ -363,7 +364,7 @@ struct BenchArgs {
 
 #[derive(Args)]
 struct PresetArgs {
-    /// 内置预设名（cream_skin）
+    /// 内置预设名（cream_skin | wedding_dark_interior）
     #[arg(long, default_value = "cream_skin")]
     name: String,
     #[arg(short, long)]
@@ -515,6 +516,10 @@ fn cmd_apply(a: ApplyArgs) -> anyhow::Result<()> {
                     e.neck_weights(&img, &faces, &params)?
                         .to_luma8()
                         .save(dir.join("neck_zone.png"))?;
+                    let teeth = e.teeth_weights(&img, &faces, &params)?;
+                    if teeth.data.iter().any(|v| *v > 0.0) {
+                        teeth.to_luma8().save(dir.join("teeth.png"))?;
+                    }
                 }
                 if let Some(m) = e.person_matte(&img)? {
                     m.to_luma8().save(dir.join("matte.png"))?;

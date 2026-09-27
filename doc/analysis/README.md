@@ -12,6 +12,7 @@
 | [face_models.md](face_models.md) | UltraFace、2d106det、Face Mesh（PINTO ONNX）的 I/O、前后处理、语义索引映射（含投票表） |
 | [curve_filter_packs.md](curve_filter_packs.md) | 美狐 `filterFile.zip` 曲线滤镜包格式与离线烘焙方案 |
 | [cream_skin.md](cream_skin.md) | 像素蛋糕「奶油肌」预设导出图的逆向分析（纹理衰减剖面、Lab 色调、形变场、瑕疵 / 疤痕处理）与复现方案（四频段、修复画笔） |
+| [wedding_dark_interior.md](wedding_dark_interior.md) | 像素蛋糕「婚纱-深色内景」预设：AI 风格调色的逐张分析（自适应黑点、主体提亮、LUT 尺寸）、先调色后修图的肤色、磨皮（中性灰平整 + 质感保留 + 立体）、身体肤色外溢、牙齿美白、脸部遮罩归属与美型的校准；两个预设的最终对照见 doc/test_report_final.md |
 | [abpn.md](abpn.md) | ModelScope ABPN 人像美肤模型（瑕疵分割 + 修复 + 匀肤，Apache-2.0）的流水线核对、ONNX 导出、评估与集成；§7 为同仓库皮肤分割图的转换与"身体皮肤遮罩语义门控" |
 
 第二轮（祛疤 / 细腻纹理）额外拉取并分析的项目：`example/FabSoften`（MIT，瑕疵检测 + 动态导向滤波 + 纹理恢复）、

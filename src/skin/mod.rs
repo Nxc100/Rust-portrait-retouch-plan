@@ -16,6 +16,8 @@ pub mod neck;
 pub mod smooth_faithful;
 pub mod smooth_freqsep;
 pub mod smooth_gpupixel;
+pub mod spill;
+pub mod teeth;
 pub mod whiten;
 
 pub use bilateral::bilateral_gpuimage;

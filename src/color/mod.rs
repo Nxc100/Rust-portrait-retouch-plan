@@ -1,8 +1,9 @@
-//! 颜色运算：512 查找图、.cube 3D LUT、一维曲线、混合模式、HSB 矩阵、内嵌冲印设置（crs）的再应用。
+//! 颜色运算：512 查找图、.cube 3D LUT、一维曲线、混合模式、HSB 矩阵、内嵌冲印设置（crs）的再应用、预设调色。
 
 pub mod blend;
 pub mod curve;
 pub mod develop;
+pub mod grade;
 pub mod hsb;
 pub mod lab;
 pub mod lookup512;

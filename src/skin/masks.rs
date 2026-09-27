@@ -32,6 +32,8 @@ pub struct SkinMasks {
     /// 语义皮肤概率（全分辨率，0..1；有皮肤分割模型且处理身体时才有）。身体遮罩为了连贯会把小块非皮肤
     /// （纹身、项链、衣褶）包进来，瑕疵 / 疤痕检测再用它排除这些物体
     pub skin_prob: Option<Arc<GrayF32>>,
+    /// 人像 alpha（全分辨率；有抠图模型且处理身体时才有）。身体色调外溢（`skin::spill`）以它为界
+    pub person: Option<Arc<GrayF32>>,
 }
 
 /// 亮度平面（Lab 的 L，0..100）。
@@ -171,7 +173,7 @@ fn morph_clean(m: &GrayF32, sigma: f32) -> GrayF32 {
 pub fn build_skin_masks(
     orig: &ImgF32,
     faces: &[FaceKeyPoints],
-    matte: Option<&GrayF32>,
+    matte: Option<&Arc<GrayF32>>,
     skin_prob: Option<&Arc<GrayF32>>,
 ) -> SkinMasks {
     let (w, h) = (orig.w, orig.h);
@@ -328,6 +330,7 @@ pub fn build_skin_masks(
         union,
         roi,
         skin_prob: skin_prob.cloned(),
+        person: matte.cloned(),
     }
 }
 

@@ -22,7 +22,7 @@
 use crate::buffer::{GrayF32, ImgF32};
 use crate::color::lab::{f_lab, f_lab_inv, lab_to_rgb, linear_to_srgb, rgb_to_lab, srgb_to_linear};
 use crate::color::lut3d::Lut3D;
-use crate::skin::guided::{fast_gaussian, guided_filter};
+use crate::skin::guided::{edge_aware_base, fast_gaussian};
 use rayon::prelude::*;
 use std::collections::HashMap;
 
@@ -398,11 +398,6 @@ fn plane(img: &ImgF32, f: impl Fn(&[f32; 3]) -> f32 + Sync + Send) -> GrayF32 {
     GrayF32::from_vec(img.w, img.h, img.data.par_iter().map(f).collect())
 }
 
-#[inline]
-fn luma(p: &[f32; 3]) -> f32 {
-    0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2]
-}
-
 /// 线性光亮度 Y（D65，0..1）。
 #[inline]
 fn linear_y(p: &[f32; 3]) -> f32 {
@@ -414,21 +409,6 @@ fn linear_y(p: &[f32; 3]) -> f32 {
 #[inline]
 fn lstar(y: f32) -> f32 {
     116.0 * f_lab(y.max(0.0)) - 16.0
-}
-
-/// 保边基底：以亮度为引导逐通道导向滤波（半径 r，eps 为局部方差门限）。
-fn edge_aware_base(img: &ImgF32, r: usize, eps: f32) -> ImgF32 {
-    let guide = plane(img, luma);
-    let sub = (r / 4).clamp(1, 4);
-    let ch: Vec<GrayF32> = (0..3)
-        .map(|c| guided_filter(&plane(img, move |p| p[c]), &guide, r, eps, sub))
-        .collect();
-    let mut out = ImgF32::new(img.w, img.h);
-    out.data
-        .par_iter_mut()
-        .enumerate()
-        .for_each(|(i, o)| *o = [ch[0].data[i], ch[1].data[i], ch[2].data[i]]);
-    out
 }
 
 /// 亮度带通增强：`L* += k·w(E)·(G(σa) − G(σb))`，σa = 1、σb = `sigma_b`（px @ 5472 长边，× s）；

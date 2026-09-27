@@ -18,7 +18,8 @@
 //!    （遮罩内 色度 ~ L 的线性回归）压缩 `unify`——高光彩度低是物理规律，不能当色斑拉平；
 //! 5. 色调：中间调提亮（钟形，随 L 远离中心衰减）、最高光压制（去油光）；低频色度向目标肤色按比例拉近
 //!    （偏黄偏红的皮肤降得多，白净的几乎不动），再加随亮度变化的 b 偏移（亮部 / 最高光 / 阴影）。
-//!    常数由 tools/skin_tone_fit.py 在 10 张照片、16 张脸上拟合；
+//!    常数由 tools/skin_tone_fit.py 在 10 张照片、16 张脸上拟合；之后可选"立体"：脸内 0.06–0.25 瞳距的明暗结构
+//!    （遮罩内归一化低通之差）按 `stereo` 加强（像素蛋糕的"中性灰立体"；奶油肌不开）；
 //! 6. 身体皮肤（颈胸臂手）用同样的三频段处理（参数独立）；色调为随低频亮度变化的提亮（阴影到中间调是平台、
 //!    高光渐弱）与冷白偏移。色调只看低频亮度，不改变局部对比：按像素亮度提亮会把腋下、肘弯等暗褶纹加深。
 //!    色调参数按人：身体像素按到各张脸的距离软分配，混合各人（男女不同）的身体色调参数。
@@ -39,6 +40,7 @@ use crate::skin::mask::fill_polygon;
 use crate::skin::masks::{bbox_of, crop_gray, paste_gray, SkinMasks};
 use crate::skin::neck::{self, NeckParams, NeckZone};
 use crate::skin::smoothstep;
+use crate::skin::spill;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::time::Instant;
@@ -98,6 +100,9 @@ pub struct CreamParams {
     /// 眼部清晰：眼眶椭圆内的亮度局部对比增益 `L += k·(L − G(L; 0.04·瞳距))`（巩膜 / 高光更亮、
     /// 睫毛线与虹膜边缘更深）。像素蛋糕两张样张的眼区 L 标准差都变大（海边 +4–5%）
     pub eye_contrast: f32,
+    /// 立体（像素蛋糕"中性灰立体"）：脸内大尺度明暗结构（`STEREO_FINE`–`STEREO_COARSE` 瞳距，只在脸部遮罩内取样）
+    /// 的增益（0 关闭）。色调按像素亮度提亮 / 压高光会压平脸的明暗，像素蛋糕反而把五官与轮廓的明暗加强
+    pub stereo: f32,
     /// 身体皮肤：中频衰减、低中频衰减、半径（× ed_mean）、细颗粒衰减、提亮、降红、降黄、色度匀肤。
     /// 提亮 `body_lift` 是阴影到中间调的平台值（L），随低频亮度的形状见 `body_lift_weight`；
     /// 降黄是低频黄度 b 按比例 `body_pull_b` 向 `body_target_b` 拉近（偏黄的降得多，天光下偏蓝的皮肤略加暖），
@@ -115,6 +120,16 @@ pub struct CreamParams {
     pub body_pull_b: f32,
     pub body_target_b: f32,
     pub body_chroma_smooth: f32,
+    /// 身体色调外溢到语义遮罩漏掉的相邻皮肤（0..1，见 `skin::spill`；0 关闭）。只补提亮 / 降红 / 降黄，
+    /// 色调很强的预设（婚纱-深色内景）才需要——漏掉的皮肤与处理过的皮肤差得多，会显成色块
+    pub body_tone_spill: f32,
+    /// 牙齿美白（0..1，见 `skin::teeth`；0 关闭，需要人脸解析）
+    pub teeth_whiten: f32,
+    /// 脸部遮罩按人归属（取自 `body_params`）：多人时去掉每张脸遮罩里落在别人脸轮廓内的部分（脸轮廓为关键点的下颌线 + 额头点围成的多边形）。
+    /// 两人脸挨得近时，一个人的解析裁剪框会把框里另一个人的脸也标成皮肤（IMG_5785 新郎的遮罩盖住新娘的右颊与
+    /// 右眼睫毛、新娘的盖住新郎的左半边脸），不加限制时那片再按对方的参数处理一遍——色调很强的预设（婚纱-深色
+    /// 内景）里显成边界分明的色块、睫毛被提亮成金铜色。算子默认关（不改变不用预设时的输出），两个内置预设都开
+    pub face_ownership: bool,
     /// 小瑕疵祛除
     pub blemish: BlemishParams,
     pub body_blemish: bool,
@@ -157,6 +172,7 @@ impl Default for CreamParams {
             yellow_highlight: 0.97,
             yellow_shadow: 0.05,
             eye_contrast: 0.30,
+            stereo: 0.0,
             body_smooth: 0.50,
             body_low_smooth: 0.25,
             body_radius: 0.05,
@@ -169,6 +185,9 @@ impl Default for CreamParams {
             body_pull_b: 0.19,
             body_target_b: 1.3,
             body_chroma_smooth: 0.35,
+            body_tone_spill: 0.0,
+            teeth_whiten: 0.0,
+            face_ownership: false,
             blemish: BlemishParams::default(),
             body_blemish: true,
             heal: HealParams::default(),
@@ -357,6 +376,8 @@ struct Region<'a> {
     skin_prob: Option<&'a GrayF32>,
     /// 身体色调的各人来源（ROI 坐标）；为空时用 `params` 的身体色调
     body_tones: &'a [BodyTone],
+    /// 身体色调的遮罩（ROI 坐标，≥ `mask`：外溢到漏掉的相邻皮肤，见 `skin::spill`）；None 时即 `mask`
+    tone_mask: Option<&'a GrayF32>,
 }
 
 /// 身体色调：提亮、降红、降黄偏移、降黄的拉力与"拉力 × 目标黄度"。黄度改变量 `yellow + pull_target − pull_b·b`
@@ -547,7 +568,8 @@ fn process_region(planes: &mut LabPlanes, r: &Region, timing: bool) {
         .max(p.unify_sigma * 3.0)
         * ed
         * 1.5) as usize;
-    let Some((bx0, by0, bx1, by1)) = bbox_of(r.mask, 0.002, max_r.max(8)) else {
+    let Some((bx0, by0, bx1, by1)) = bbox_of(r.tone_mask.unwrap_or(r.mask), 0.002, max_r.max(8))
+    else {
         return;
     };
     let (bw, bh) = (bx1 - bx0, by1 - by0);
@@ -555,6 +577,7 @@ fn process_region(planes: &mut LabPlanes, r: &Region, timing: bool) {
         return;
     }
     let m = crop_gray(r.mask, bx0, by0, bw, bh);
+    let tone_m = r.tone_mask.map(|t| crop_gray(t, bx0, by0, bw, bh));
     let mut sub = LabPlanes {
         w: bw,
         h: bh,
@@ -851,8 +874,9 @@ fn process_region(planes: &mut LabPlanes, r: &Region, timing: bool) {
         let uniform = uniform_body_tone(r.body_tones, fallback);
         let origin = P::new(bx0 as f32, by0 as f32);
         let sigma = (TONE_LOWPASS * ed).max(1.0);
-        let low_l = masked_gaussian(&sub.l, &m, sigma);
-        let low_b = masked_gaussian(&sub.b, &m, sigma);
+        let m = tone_m.as_ref().unwrap_or(&m);
+        let low_l = masked_gaussian(&sub.l, m, sigma);
+        let low_b = masked_gaussian(&sub.b, m, sigma);
         sub.l
             .data
             .par_iter_mut()
@@ -882,6 +906,29 @@ fn process_region(planes: &mut LabPlanes, r: &Region, timing: bool) {
             "  [cream/{tag}] tone: {:.0} ms",
             t.elapsed().as_secs_f64() * 1e3
         );
+    }
+
+    // 5b. 立体：脸内五官与轮廓尺度的明暗结构按比例加强（只在遮罩内取样：眼、眉、嘴、头发与背景不参与）
+    if r.is_face && p.stereo > 0.0 {
+        let t = Instant::now();
+        let fine = masked_gaussian(&sub.l, &m, (STEREO_FINE * ed).max(1.0));
+        let coarse = masked_gaussian(&sub.l, &m, (STEREO_COARSE * ed).max(1.0));
+        sub.l
+            .data
+            .par_iter_mut()
+            .zip(fine.data.par_iter().zip(&coarse.data))
+            .zip(&m.data)
+            .for_each(|((l, (f, c)), mk)| {
+                if *mk > 0.0 {
+                    *l = (*l + p.stereo * (f - c) * mk).clamp(0.0, 100.0);
+                }
+            });
+        if timing {
+            eprintln!(
+                "  [cream/{tag}] stereo: {:.0} ms",
+                t.elapsed().as_secs_f64() * 1e3
+            );
+        }
     }
 
     // 6. 眼部清晰（眼眶椭圆：内外眼角连线为长轴、上下眼睑距离 + 睫毛余量为短轴，羽化）
@@ -967,6 +1014,68 @@ fn neck_zones(
             neck::neck_zone(parse, origin, rect, planes, &allowed, ed, &p.neck).map(|z| (i, z))
         })
         .collect()
+}
+
+/// 立体的结构层：脸部遮罩内归一化低通 σ（× 瞳距）之差——细于 STEREO_FINE 的是纹理与斑驳（磨皮管），粗于
+/// STEREO_COARSE 的是整张脸的受光（色调管），中间是鼻梁、颧骨、眼窝、下颌这些五官与轮廓的明暗
+const STEREO_FINE: f32 = 0.06;
+const STEREO_COARSE: f32 = 0.25;
+
+/// 脸轮廓（关键点的下颌线 + 额头点围成的多边形）的羽化 σ（× 瞳距）与栅格化的目标尺度（缩到瞳距约 OUTLINE_ED 像素）
+const OUTLINE_FEATHER: f32 = 0.04;
+const OUTLINE_ED: f32 = 16.0;
+
+/// 各张脸的轮廓区域（区域坐标，低分辨率），用来判断脸部遮罩的越界：一个人的解析遮罩落在别人脸轮廓内、又不在
+/// 自己脸轮廓内的部分属于别人。轮廓都不覆盖的地方（耳朵、发际、遮罩的羽化边）不受影响。
+struct FaceOutlines {
+    small: Vec<GrayF32>,
+    size: (usize, usize),
+}
+
+impl FaceOutlines {
+    /// `off` 为区域左上角（全图坐标），`size` 为区域大小，`eds` 为各脸的瞳距当量。
+    fn new(faces: &[FaceKeyPoints], off: P, size: (usize, usize), eds: &[f32]) -> Self {
+        let ed_min = eds.iter().copied().fold(f32::INFINITY, f32::min).max(1.0);
+        let k = (ed_min / OUTLINE_ED).floor().max(1.0);
+        let (sw, sh) = (
+            ((size.0 as f32 / k).ceil() as usize).max(1),
+            ((size.1 as f32 / k).ceil() as usize).max(1),
+        );
+        let small = faces
+            .iter()
+            .zip(eds)
+            .map(|(f, &ed)| {
+                let poly: Vec<P> = f
+                    .contour
+                    .iter()
+                    .chain(&f.forehead)
+                    .map(|p| p.sub(off).mul(1.0 / k))
+                    .collect();
+                let mut m = GrayF32::new(sw, sh);
+                fill_polygon(&mut m, &poly, 1.0);
+                fast_gaussian(&m, (OUTLINE_FEATHER * ed / k).max(0.7))
+            })
+            .collect();
+        Self { small, size }
+    }
+
+    /// 第 `k` 张脸的遮罩要去掉的份额（0..1，区域分辨率）：别人轮廓内 ×（1 − 自己轮廓内）。
+    fn foreign(&self, k: usize) -> GrayF32 {
+        let own = &self.small[k];
+        let data = (0..own.data.len())
+            .map(|i| {
+                let other = self
+                    .small
+                    .iter()
+                    .enumerate()
+                    .filter(|&(j, _)| j != k)
+                    .map(|(_, m)| m.data[i])
+                    .fold(0.0f32, f32::max);
+                other * (1.0 - own.data[i])
+            })
+            .collect();
+        GrayF32::from_vec(own.w, own.h, data).resize(self.size.0, self.size.1)
+    }
 }
 
 /// 人脸框的中心（全图坐标）。
@@ -1078,8 +1187,36 @@ pub fn cream_skin(
         None => Vec::new(),
     };
     let neck_zones_ms = t.elapsed().as_secs_f64() * 1e3;
+    // 身体色调外溢：在处理前的颜色上确定（见 `skin::spill`）
+    let spill = body_mask
+        .as_ref()
+        .zip(masks.person.as_ref())
+        .filter(|_| body_params.body_tone_spill > 0.0)
+        .map(|(body, person)| {
+            let mut faces_roi = GrayF32::new(cw, ch);
+            for fm in &masks.faces {
+                faces_roi.max_inplace(&crop_gray(fm, x0, y0, cw, ch));
+            }
+            let person_roi = crop_gray(person, x0, y0, cw, ch);
+            let open = [x0 == 0, y0 == 0, x1 == orig.w, y1 == orig.h];
+            spill::tone_spill(&planes, body, &faces_roi, &person_roi, ed_mean, open)
+        });
+    let strength = body_params.body_tone_spill;
+    let body_tone_mask = body_mask
+        .as_ref()
+        .zip(spill.as_ref())
+        .map(|(b, sp)| spill::with_spill(b, sp, strength));
+    let outlines = (body_params.face_ownership && faces.len() > 1)
+        .then(|| FaceOutlines::new(faces, off, (cw, ch), &face_eds));
     for (i, fm) in masks.faces.iter().enumerate() {
-        let m = crop_gray(fm, x0, y0, cw, ch);
+        let mut m = crop_gray(fm, x0, y0, cw, ch);
+        if let Some(o) = outlines.as_ref().filter(|_| i < faces.len()) {
+            let foreign = o.foreign(i);
+            m.data
+                .par_iter_mut()
+                .zip(&foreign.data)
+                .for_each(|(v, f)| *v *= 1.0 - f);
+        }
         let params = face_params.get(i).copied().unwrap_or(body_params);
         process_region(
             &mut planes,
@@ -1091,6 +1228,7 @@ pub fn cream_skin(
                 geom: faces.get(i).map(|f| FaceGeom::from_face(f, off)),
                 skin_prob: skin_prob.as_ref(),
                 body_tones: &[],
+                tone_mask: None,
             },
             timing,
         );
@@ -1111,6 +1249,7 @@ pub fn cream_skin(
                 geom: None,
                 skin_prob: skin_prob.as_ref(),
                 body_tones: &body_tones,
+                tone_mask: body_tone_mask.as_ref(),
             },
             timing,
         );
@@ -1130,7 +1269,10 @@ pub fn cream_skin(
         );
     }
     let t = Instant::now();
-    let union = crop_gray(&masks.union, x0, y0, cw, ch);
+    let mut union = crop_gray(&masks.union, x0, y0, cw, ch);
+    if let Some(sp) = &spill {
+        union = spill::with_spill(&union, sp, strength);
+    }
     let mut sub_out = sub;
     planes.blend_into(&mut sub_out, &union);
     out.data
@@ -1178,6 +1320,7 @@ mod tests {
             union: m.clone(),
             roi: Some((10, 10, 110, 90)),
             skin_prob: None,
+            person: None,
         };
         let p = CreamParams::default();
         let face = FaceKeyPoints {
@@ -1203,6 +1346,60 @@ mod tests {
             var(&out),
             var(&img)
         );
+    }
+
+    #[test]
+    fn stereo_deepens_facial_shading_only_inside_the_mask() {
+        // 脸内一个柔和的亮包（颧骨 / 鼻梁一级，σ = 0.15 瞳距）：开立体后中心更亮、周围更暗，遮罩外逐位不变
+        let (w, h) = (120, 100);
+        let mut img = ImgF32::filled(w, h, [0.70, 0.55, 0.48]);
+        for y in 0..h {
+            for x in 0..w {
+                let r2 = (x as f32 - 60.0).powi(2) + (y as f32 - 50.0).powi(2);
+                let bump = 0.08 * (-r2 / (2.0 * 6.0 * 6.0)).exp();
+                for c in &mut img.data[y * w + x] {
+                    *c += bump;
+                }
+            }
+        }
+        let mut m = GrayF32::new(w, h);
+        for y in 15..85 {
+            for x in 15..105 {
+                m.data[y * w + x] = 1.0;
+            }
+        }
+        let masks = SkinMasks {
+            faces: vec![m.clone()],
+            body: None,
+            union: m.clone(),
+            roi: Some((5, 5, 115, 95)),
+            skin_prob: None,
+            person: None,
+        };
+        let face = FaceKeyPoints {
+            pupil_l: P::new(40.0, 40.0),
+            pupil_r: P::new(80.0, 40.0),
+            nose_bridge_top: P::new(60.0, 40.0),
+            chin: P::new(60.0, 95.0),
+            ..Default::default()
+        };
+        let flat = CreamParams::default();
+        let stereo = CreamParams {
+            stereo: 0.4,
+            ..CreamParams::default()
+        };
+        let a = cream_skin(&img, &masks, std::slice::from_ref(&face), &[&flat], &flat);
+        let b = cream_skin(
+            &img,
+            &masks,
+            std::slice::from_ref(&face),
+            &[&stereo],
+            &stereo,
+        );
+        let l = |im: &ImgF32, x: usize, y: usize| crate::color::lab::rgb_to_lab(im.get(x, y))[0];
+        assert!(l(&b, 60, 50) > l(&a, 60, 50) + 0.3, "centre brighter");
+        assert!(l(&b, 60, 64) < l(&a, 60, 64), "surroundings darker");
+        assert_eq!(b.get(2, 2), img.get(2, 2), "outside the mask");
     }
 
     #[test]
@@ -1242,6 +1439,7 @@ mod tests {
             union: body,
             roi: Some((0, 0, w, h)),
             skin_prob: None,
+            person: None,
         };
         let mut p = CreamParams {
             body_smooth: 0.0,
@@ -1336,6 +1534,29 @@ mod tests {
         let p = CreamParams::default();
         let back: CreamParams = serde_json::from_str(&serde_json::to_string(&p).unwrap()).unwrap();
         assert_eq!(back.body_pull_b, p.body_pull_b);
+    }
+
+    #[test]
+    fn face_outlines_remove_only_the_part_inside_another_face() {
+        // 两张方脸（轮廓 20..60、70..110），第 0 张脸的解析遮罩越界盖到第 1 张脸上：越界处份额 ≈ 1，
+        // 自己脸上与两张脸都不覆盖的地方为 0
+        let square = |x0: f32| FaceKeyPoints {
+            contour: vec![
+                P::new(x0, 20.0),
+                P::new(x0 + 40.0, 20.0),
+                P::new(x0 + 40.0, 60.0),
+                P::new(x0, 60.0),
+            ],
+            ..Default::default()
+        };
+        let faces = [square(20.0), square(70.0)];
+        let o = FaceOutlines::new(&faces, P::new(0.0, 0.0), (130, 80), &[40.0, 40.0]);
+        let f0 = o.foreign(0);
+        assert!(f0.get(90, 40) > 0.95, "{}", f0.get(90, 40));
+        assert!(f0.get(40, 40) < 0.01, "{}", f0.get(40, 40));
+        assert!(f0.get(40, 75) < 0.01 && f0.get(125, 40) < 0.01);
+        let f1 = o.foreign(1);
+        assert!(f1.get(40, 40) > 0.95 && f1.get(90, 40) < 0.01);
     }
 
     #[test]

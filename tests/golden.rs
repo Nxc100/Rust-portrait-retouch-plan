@@ -69,6 +69,12 @@ fn param_sets() -> Vec<(&'static str, RetouchParams)> {
                 .to_params()
                 .expect("builtin preset"),
         ),
+        (
+            "wedding_dark_interior",
+            portrait_retouch::Preset::wedding_dark_interior()
+                .to_params()
+                .expect("builtin preset"),
+        ),
     ]
 }
 

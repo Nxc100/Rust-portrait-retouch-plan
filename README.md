@@ -10,6 +10,7 @@
 | 磨皮 B（自然磨皮，`freqsep`） | 高反差保留 + 肤色曲线 + 亮度锐化 | YUCIHighPassSkinSmoothing |
 | 磨皮 C（`gpupixel`） | 均值 / 方差自适应磨皮 | pixpark/gpupixel |
 | **奶油肌**（`cream`，预设 `--preset cream`） | 人脸解析 + 人像抠图 + 语义皮肤分割的皮肤遮罩、AI 瑕疵分割 + 修复（ABPN）、疤痕 / 大痣修复画笔（能量判据 + 调和插值 + 纹理移植）、能量自适应的保纹理磨皮、匀肤 / 肤色统一、奶油色调、眼部清晰、颈纹淡化（连同横过脖子的碎发）、身体遮罩按颜色连续性修正（有色光下的皮肤不漏）、按性别的瘦脸 / 缩下巴；可选再应用输入 JPEG 内嵌的 Camera Raw 设置（`--embedded-develop`，默认关闭） | 对像素蛋糕「奶油肌」导出图的逆向分析（doc/analysis/cream_skin.md、abpn.md；两张样张的对比 doc/test_report_cream.md、doc/test_report_x04.md；身体色调 doc/test_report_body_tone.md；颈纹 doc/test_report_neck.md；身体皮肤的阴影色块 doc/test_report_shadow_blotches.md） |
+| **婚纱-深色内景**（预设 `--preset 婚纱-深色内景`） | 奶油肌的修图算子（中性灰式的平整磨皮 + 立体、更强的肤色统一并外溢到漏检的身体皮肤、牙齿美白、更重的瘦下颌 + 轻度放大眼睛）+ 预设调色：自适应软黑点（朦胧 / 高调画面压暗加对比）→ 全局 3D LUT（整体压暗、蓝紫加深、红橙黄提亮）→ 人物主体提亮（按人像 alpha）；调色先于修图，肤色统一作用在调色后的颜色上 | 对像素蛋糕「婚纱-深色内景」导出图的逆向分析（doc/analysis/wedding_dark_interior.md；doc/test_report_wedding_dark_interior.md；两个预设的最终对照 doc/test_report_final.md） |
 | 美白 | 参数化曲线或 512 查找图 × 皮肤遮罩 | 方案 4.4 |
 | 瘦脸 / 大眼 / 瘦鼻 | `warpPositionToUse1` / `adjust_eye` / `newNarrowNose_2` 像素空间移植（另有 gpupixel 风格） | 美狐 `GLImageFaceChangeFilter` |
 | 风格滤镜 | 512×512 查找图、.cube 3D LUT、带空间遮罩的 LUT | GPUImage Lookup |
@@ -23,21 +24,27 @@ src/bin/        retouch 命令行
 gui/            图形界面（Tauri 2，工作区成员 portrait-retouch-gui）：手动测试各项功能，见 gui/README.md
 models/         ONNX 模型（不入库，scripts/fetch_models.py）
 runtime/        onnxruntime 动态库（不入库，scripts/fetch_onnxruntime.py）
-luts/           恒等 / 示例 LUT 与 index.json（tools/make_luts.py 生成）
+luts/           恒等 / 示例 LUT 与 index.json（tools/make_luts.py 生成）；wedding_dark_interior.cube 为「婚纱-深色内景」
+                预设调色的全局 LUT（tools/grade_fit.py 拟合，编译进程序）
 tools/          bake_lut.py（曲线滤镜包烘焙）、oracle_numpy.py（数值对照）、make_luts.py、
                 compare_to_reference.py（与参考导出图定量对比）、texture_energy.py（按局部能量分箱的纹理衰减）、
                 develop_fit.py（Camera Raw 设置再应用的模型拟合）、montage.py（并排裁剪对比图）、
                 batch_compare.py（整批与参考导出逐脸对比）、skin_tone_fit.py（肤色目标色模型拟合）、
-                body_tone_fit.py（身体色调的拟合与评估）、
-                sample_montages.py（重新生成文档引用的样张对比图）、
+                body_tone_fit.py（身体色调的拟合与评估）、grade_fit.py（预设调色：自适应黑点 / 全局 LUT / 主体的拟合）、
+                skin_bands.py（脸部皮肤各带通的中位幅度比：磨皮 / 中性灰平整的校准）、
+                sample_montages.py（重新生成文档引用的样张对比图与最终对照组）、image_delta.py（整图与参考导出的色差）、
+                预设校准：preset_sweep.py（只调色底图 / 一组参数的试跑与评估）、band_gain.py（大尺度明暗结构增益，立体）、
+                face_tone.py（逐脸与脸 − 身体的皮肤颜色）、teeth_compare.py（牙齿颜色）、mask_overlay.py（各张脸遮罩的叠加与越界）、
+                pixcake_param_diff.py（对照像素蛋糕各预设的滑块值），用法见 doc/adding_a_preset.md；
                 abpn/（ABPN 网络定义与 ONNX 导出）
 tests/          identity.rs（恒等性）、golden.rs（视觉回归，需样张目录）
 test/           用户提供的样张与像素蛋糕导出图（真实人物照片，不入库；各测试报告的复现命令需要本地有这些照片）
-out/            测试产物（不入库），只收录 out/对比图/：两批样张「奶油肌」批处理的完整对比（原图 | 本程序 | 像素蛋糕）
+out/            测试产物（不入库），只收录 out/对比图/：两批样张「奶油肌」「婚纱-深色内景」批处理的完整对比（原图 | 本程序 | 像素蛋糕）；
+                out/最终对照组/ 为两个预设并排的最终对照（收录对比图与分析，全尺寸批处理输出不入库）
 benches/        criterion 基准
 examples/       dump_landmarks.rs（关键点核对）
 example/        参考项目浅克隆（scripts/fetch_examples.sh，不入库）
-doc/            方案文档与源码分析笔记
+doc/            方案文档与源码分析笔记；预设的实现 doc/presets.md，添加预设的步骤与踩过的坑 doc/adding_a_preset.md
 ```
 
 ## 快速开始
@@ -69,8 +76,9 @@ retouch apply -i photo.jpg -o out.jpg --preset cream --set cream_female.detail_s
 retouch apply -i photo.jpg -o out.jpg --preset cream --no-ai-blemish --debug-dir dbg # 只用经典瑕疵检测 / 修复；dbg/ 导出遮罩与 ai_holes.png
 retouch apply -i photo.jpg -o out.jpg --preset cream --skinseg-model models/skin_seg_lite.onnx   # 指定皮肤分割模型（--no-skinseg 关闭）
 retouch apply -i photo.jpg -o out.jpg --preset cream --embedded-develop   # 再应用 JPEG 内嵌的 Camera Raw 设置（可选，见下）
+retouch apply -i photo.jpg -o out.jpg --preset 婚纱-深色内景                # 婚纱-深色内景一键预设（调色 + 修图）
 retouch batch -i photos/ -o retouched/ --preset cream                       # 批量：整个目录（-r 递归），见下
-retouch preset -o my_preset.json                                            # 导出内置预设，编辑后 --preset my_preset.json
+retouch preset -o my_preset.json [--name wedding_dark_interior]             # 导出内置预设，编辑后 --preset my_preset.json
 retouch apply -i photo.jpg -o out.jpg --landmarks facemesh ...             # 发布期关键点模型
 retouch detect -i photo.jpg -o vis.png --json lm.json --indices            # 关键点可视化 / 核对
 retouch bench  -i photo.jpg                                                # 分阶段计时
@@ -141,7 +149,7 @@ report.write(&cfg.output_dir)?;                         // batch_report.csv / .j
 ## 验证
 
 ```bash
-cargo test                                   # 104 单元 + 10 恒等性测试（只含库与命令行）
+cargo test                                   # 131 单元 + 10 恒等性测试（只含库与命令行）
 cargo test -p portrait-retouch-gui           # 图形界面后端 19 个单元测试；界面冒烟测试见 gui/README.md
 PORTRAIT_SAMPLES=tests/samples cargo test --release --test golden   # 视觉回归（样张目录不入库；UPDATE_GOLDEN=1 更新）
 cargo bench --bench retouch                  # 12MP / 1280 预览基准

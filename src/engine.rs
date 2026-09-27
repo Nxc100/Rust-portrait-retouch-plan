@@ -453,15 +453,40 @@ impl Engine {
         faces: &[FaceKeyPoints],
         p: &RetouchParams,
     ) -> anyhow::Result<GrayF32> {
+        let pre = self.cream_precomp(img, faces, p)?;
+        Ok(crate::pipeline::cream_neck_weights(&pre, faces, p))
+    }
+
+    /// 奶油肌牙齿美白的处理权重（全图，0..1，已乘强度；调试 / 可视化用）。门限所用的底图与 [`Engine::retouch`]
+    /// 相同（调色后、修图前）。
+    pub fn teeth_weights(
+        &self,
+        img: &image::RgbImage,
+        faces: &[FaceKeyPoints],
+        p: &RetouchParams,
+    ) -> anyhow::Result<GrayF32> {
+        let pre = self.cream_precomp(img, faces, p)?;
+        Ok(crate::pipeline::cream_teeth_weights(&pre, faces, p))
+    }
+
+    /// 带齐奶油肌底图所需模型结果（人像 alpha、皮肤概率、AI 瑕疵补丁）的预计算，与 [`Engine::retouch`] 一致。
+    fn cream_precomp(
+        &self,
+        img: &image::RgbImage,
+        faces: &[FaceKeyPoints],
+        p: &RetouchParams,
+    ) -> anyhow::Result<Arc<Precomp>> {
         let pre = self.precomp(img);
-        if p.body_skin {
+        if p.body_skin || needs_matte(p) {
             pre.set_matte(self.person_matte(img)?);
+        }
+        if p.body_skin {
             pre.set_skin_prob(self.skin_prob(img)?);
         }
         if p.ai_blemish > 0.0 && !faces.is_empty() {
             self.ai_patches(&pre, faces)?;
         }
-        Ok(crate::pipeline::cream_neck_weights(&pre, faces, p))
+        Ok(pre)
     }
 
     /// 完整修图；`faces` 为 `detect_faces` 的结果（可缓存，滑块调整时不必重检）。
@@ -481,7 +506,7 @@ impl Engine {
         p: &RetouchParams,
     ) -> ImgF32 {
         let pre = self.precomp(img);
-        if p.smooth_mode == SmoothMode::Cream && p.body_skin && pre.matte().is_none() {
+        if needs_matte(p) && pre.matte().is_none() {
             match self.person_matte(img) {
                 Ok(m) => pre.set_matte(m),
                 Err(e) => eprintln!("warning: person matting failed: {e}"),
@@ -500,6 +525,12 @@ impl Engine {
         }
         retouch_with(&pre, faces, p)
     }
+}
+
+/// 这组参数要不要人像 alpha：奶油肌处理身体皮肤，或预设调色有人物主体的调整。
+fn needs_matte(p: &RetouchParams) -> bool {
+    (p.smooth_mode == SmoothMode::Cream && p.body_skin)
+        || p.grade.as_ref().is_some_and(|g| g.adjusts_subject())
 }
 
 /// 图像内容哈希：尺寸 + 步进采样（每 997 个字节取一个）。

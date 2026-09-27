@@ -1,13 +1,15 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
 """重新生成文档引用的样张对比图（out/cream/、out/x04/、out/batch_compare/、out/body_tone/、out/neck/、
-out/blotches/、out/batch_test/compare/）与完整对比图（out/对比图/）。
+out/blotches/、out/batch_test/compare/）、完整对比图（out/对比图/：奶油肌两批、婚纱-深色内景两批）与最终对照组
+（out/最终对照组/对比图/：两个预设并排，见 doc/test_report_final.md）。
 
-    python tools/sample_montages.py [cream] [x04] [batch] [body] [neck] [blotches] [batch_test] [compare_all]
+    python tools/sample_montages.py [cream] [x04] [batch] [body] [neck] [blotches] [batch_test] [compare_all] [final]
 
 前提：已按 out/README.md 生成本项目输出（out/cream/ours_cream.jpg、out/x04/ours_cream.jpg、
 out/x04/lite/ours_cream_lite.jpg、out/batch/*.jpg 与 out/batch/_landmarks/，
-out/batch_test/*.jpg 与 out/batch_test/_landmarks/）；
+out/batch_test/*.jpg 与 out/batch_test/_landmarks/；婚纱-深色内景为 out/batch_dark_interior/、
+out/batch_test_dark_interior/，命令同上加 `--preset 婚纱-深色内景`）；
 轻量皮肤分割对照还需要 out/_work/beach_lite.jpg（`retouch apply ... --skinseg-model models/skin_seg_lite.onnx`）；
 身体色调修改前后的对比（body）还需要修改前（提交 5d21223）的批处理输出 out/_work/body_before/*.jpg：
     git worktree add ../prb-before 5d21223 && cd ../prb-before && cargo build --release
@@ -70,11 +72,21 @@ ORIG_DIR, REF_DIR, AFTER_DIR = 'test/原片', 'test/像素蛋糕“奶油肌”�
 BATCH_TEST_DIR, BATCH_TEST_OUT = 'test/批量测试', 'out/batch_test'
 
 # 完整对比图（out/对比图/）：每张照片一张全图，另有每张脸、脖子的局部；有像素蛋糕导出的照片多一列。
-# （原片目录，本程序的批处理输出目录，对比图目录）；关键点取批处理输出目录下的 _landmarks/
+# （原片目录，本程序的批处理输出目录，像素蛋糕同名预设的导出目录，对比图目录）；关键点取批处理输出目录下的 _landmarks/
+DARK_REF_DIR = 'test/像素蛋糕“婚纱-深色内景”预设产物'
 COMPARE_SETS = [
-    (ORIG_DIR, AFTER_DIR, 'out/对比图/原片'),
-    (BATCH_TEST_DIR, BATCH_TEST_OUT, 'out/对比图/批量测试'),
+    (ORIG_DIR, AFTER_DIR, REF_DIR, 'out/对比图/原片'),
+    (BATCH_TEST_DIR, BATCH_TEST_OUT, REF_DIR, 'out/对比图/批量测试'),
+    (ORIG_DIR, 'out/batch_dark_interior', DARK_REF_DIR, 'out/对比图/婚纱-深色内景/原片'),
+    (BATCH_TEST_DIR, 'out/batch_test_dark_interior', DARK_REF_DIR, 'out/对比图/婚纱-深色内景/批量测试'),
 ]
+# 最终对照组（out/最终对照组/，doc/test_report_final.md）：两个预设 × 两批照片的批处理输出放在
+# out/最终对照组/<预设>/<批>/（含 _landmarks/），五列对比图放在 out/最终对照组/对比图/<批>/
+FINAL_DIR = 'out/最终对照组'
+FINAL_PRESETS = [('奶油肌', REF_DIR), ('婚纱-深色内景', DARK_REF_DIR)]
+FINAL_SETS = [ORIG_DIR, BATCH_TEST_DIR]
+FINAL_LONG_SIDE = 1600      # 五列全图里每块的长边
+FINAL_CROP_WIDTH = 640      # 五列脸 / 脖子里每块的宽
 COMPARE_LONG_SIDE = 2400    # 全图对比里每块的长边（像素）
 COMPARE_CROP_WIDTH = 800    # 脸 / 脖子对比里每块的宽（像素）
 COMPARE_MIN_SCORE = 0.95    # 人脸检测得分更低的是裙摆亮片、花束上的误检，不出局部图
@@ -148,10 +160,17 @@ def face_boxes(bbox, img_w, img_h):
     return clip((cx - s, cy - s, cx + s, cy + s)), clip((cx - 0.9 * w, y2 - 0.2 * h, cx + 0.9 * w, y2 + 1.0 * h))
 
 
+def find_ref(ref_dir, stem):
+    """参考导出目录里与 `stem` 同名（不区分大小写）的文件；没有时为 None。"""
+    refs = [q for q in glob.glob(os.path.join(ref_dir, '*'))
+            if os.path.isfile(q) and os.path.splitext(os.path.basename(q))[0].lower() == stem.lower()]
+    return refs[0] if refs else None
+
+
 def compare_all():
     """out/对比图/：每张照片 `<照片>_全图.jpg`，每张脸 `<照片>_脸<k>.jpg` / `<照片>_脖子<k>.jpg`；
     列为 原图 | 本程序 | 像素蛋糕（没有像素蛋糕导出时只有前两列）。"""
-    for orig_dir, ours_dir, out_dir in COMPARE_SETS:
+    for orig_dir, ours_dir, ref_dir, out_dir in COMPARE_SETS:
         os.makedirs(out_dir, exist_ok=True)
         for p in sorted(glob.glob(os.path.join(orig_dir, '*'))):
             stem = os.path.splitext(os.path.basename(p))[0]
@@ -159,9 +178,8 @@ def compare_all():
             if not os.path.exists(ours):
                 print(f'跳过 {stem}：没有本程序的输出 {ours}')
                 continue
-            refs = [q for q in glob.glob(os.path.join(REF_DIR, '*'))
-                    if os.path.splitext(os.path.basename(q))[0].lower() == stem.lower()]
-            paths, labels = ([p, ours, refs[0]], ['原图', '本程序', '像素蛋糕']) if refs else ([p, ours], ['原图', '本程序'])
+            ref = find_ref(ref_dir, stem)
+            paths, labels = ([p, ours, ref], ['原图', '本程序', '像素蛋糕']) if ref else ([p, ours], ['原图', '本程序'])
             with Image.open(ours) as im:
                 w, h = im.size
             tile = COMPARE_LONG_SIDE if w >= h else round(COMPARE_LONG_SIDE * w / h)
@@ -180,6 +198,46 @@ def compare_all():
                 for box, part in ((face, '脸'), (neck, '脖子')):
                     montage(paths, labels, box, os.path.join(out_dir, f'{stem}_{part}{k}.jpg'),
                             COMPARE_CROP_WIDTH, COMPARE_QUALITY)
+
+
+def final_group():
+    """out/最终对照组/对比图/<批>/：每张照片 `<照片>_全图.jpg`，每张脸 `<照片>_脸<k>.jpg` / `<照片>_脖子<k>.jpg`；
+    列为 原图 | 奶油肌·本程序 | 奶油肌·像素蛋糕 | 深色内景·本程序 | 深色内景·像素蛋糕（没有像素蛋糕导出的列省去）。
+    人脸取奶油肌那批的关键点（两个预设的人脸检测相同）。"""
+    for orig_dir in FINAL_SETS:
+        batch = os.path.basename(orig_dir)
+        out_dir = os.path.join(FINAL_DIR, '对比图', batch)
+        os.makedirs(out_dir, exist_ok=True)
+        for p in sorted(glob.glob(os.path.join(orig_dir, '*'))):
+            stem = os.path.splitext(os.path.basename(p))[0]
+            paths, labels = [p], ['原图']
+            for preset, ref_dir in FINAL_PRESETS:
+                ours = os.path.join(FINAL_DIR, preset, batch, stem + '.jpg')
+                if not os.path.exists(ours):
+                    continue
+                short = '深色内景' if preset.startswith('婚纱') else preset
+                paths.append(ours)
+                labels.append(f'{short}·本程序')
+                ref = find_ref(ref_dir, stem)
+                if ref:
+                    paths.append(ref)
+                    labels.append(f'{short}·像素蛋糕')
+            if len(paths) == 1:
+                print(f'跳过 {stem}：没有本程序的输出')
+                continue
+            with Image.open(paths[1]) as im:
+                w, h = im.size
+            tile = FINAL_LONG_SIDE if w >= h else round(FINAL_LONG_SIDE * w / h)
+            montage(paths, labels, (0, 0, w, h), os.path.join(out_dir, f'{stem}_全图.jpg'), tile, COMPARE_QUALITY)
+            lm = os.path.join(FINAL_DIR, FINAL_PRESETS[0][0], batch, '_landmarks', stem + '.json')
+            if not os.path.exists(lm):
+                continue
+            real = [f for f in json.load(open(lm, encoding='utf-8'))['faces'] if f.get('score', 1.0) >= COMPARE_MIN_SCORE]
+            for k, f in enumerate(real, 1):
+                face, neck = face_boxes(f['bbox'], w, h)
+                for box, part in ((face, '脸'), (neck, '脖子')):
+                    montage(paths, labels, box, os.path.join(out_dir, f'{stem}_{part}{k}.jpg'),
+                            FINAL_CROP_WIDTH, COMPARE_QUALITY)
 
 
 def change_locations(orig, ours, out, thr, long_side=1400):
@@ -240,7 +298,8 @@ BLOTCH_JOBS = [
 
 
 def main():
-    which = set(sys.argv[1:]) or {'cream', 'x04', 'batch', 'body', 'neck', 'blotches', 'batch_test', 'compare_all'}
+    which = set(sys.argv[1:]) or {'cream', 'x04', 'batch', 'body', 'neck', 'blotches', 'batch_test', 'compare_all',
+                                  'final'}
     if 'cream' in which:
         for out, box, width in CREAM:
             items = three(BEACH, BEACH_PC, BEACH_OURS)
@@ -273,6 +332,8 @@ def main():
             ours = os.path.join(BATCH_TEST_OUT, stem + '.jpg')
             if os.path.exists(ours):
                 change_locations(p, ours, os.path.join(compare_dir, f'{stem}_changes.png'), 8)
+    if 'final' in which:
+        final_group()
     if 'compare_all' in which:
         compare_all()
 

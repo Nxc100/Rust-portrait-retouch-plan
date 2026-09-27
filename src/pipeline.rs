@@ -1,14 +1,18 @@
 //! 流水线编排：皮肤遮罩 → 磨皮（A/B/C/奶油肌）→ 提亮饱和 → 美白 → 形变 → 风格 LUT → 遮罩 LUT。
+//! 预设调色（`color::grade`）在形变之前：奶油肌在修图之前作用于底图（像素蛋糕先调色、后修图），
+//! 其余磨皮模式在磨皮、美白之后。
 //!
 //! 顺序与美狐 Demo 一致（颜色 → 形变 → 风格），关键点只在原图上检测一次。
 //! 所有半径 / 位移以瞳距为尺度，所有模糊在固定短边的工作副本上进行，预览与导出观感一致。
 
 use crate::buffer::{GrayF32, ImgF32};
 use crate::color::curve::Curve256;
+use crate::color::grade::{subject_weights, Grade};
 use crate::color::lookup512::apply_lookup512;
 use crate::color::lut3d::{apply_lut3d, Lut3D};
 use crate::face::attribute::Gender;
 use crate::face::semantic::FaceKeyPoints;
+use crate::geom::P;
 use crate::preset::GenderWarp;
 use crate::skin::ai_blemish::AiPatches;
 use crate::skin::cream::CreamParams;
@@ -111,6 +115,9 @@ pub struct RetouchParams {
     pub warp_coeffs: WarpCoefficients,
     /// 侧脸时衰减瘦脸 / 瘦鼻（默认 true）
     pub attenuate_yaw: bool,
+    // ---- 预设调色（见 `color::grade`）：奶油肌在修图之前作用于底图，其余模式在磨皮之后；
+    // 人物主体的调整需要人像 alpha，没有时只做全局部分 ----
+    pub grade: Option<Arc<Grade>>,
     // ---- 风格 ----
     pub style: Option<StyleFilter>,
     /// 0..1，默认 0.8
@@ -151,6 +158,7 @@ impl Default for RetouchParams {
             reshape_style: ReshapeStyle::Meihu,
             warp_coeffs: WarpCoefficients::default(),
             attenuate_yaw: true,
+            grade: None,
             style: None,
             style_intensity: 0.8,
             masked_ops: Vec::new(),
@@ -343,7 +351,7 @@ impl Precomp {
         let m = Arc::new(skin::masks::build_skin_masks(
             &self.orig,
             faces,
-            matte.as_deref(),
+            matte.as_ref(),
             skin.as_ref(),
         ));
         *g = Some((key, m.clone()));
@@ -462,6 +470,49 @@ fn cream_base<'a>(pre: &'a Precomp, faces: &[FaceKeyPoints], p: &RetouchParams) 
     Cow::Borrowed(&pre.orig)
 }
 
+/// 奶油肌修图的输入：底图（[`cream_base`]）再做预设调色。像素蛋糕先调色、后修图——肤色统一作用在调色后的
+/// 颜色上，调色把整张图压暗、加对比时，皮肤仍被拉回目标色（doc/analysis/wedding_dark_interior.md）。
+fn cream_input<'a>(
+    pre: &'a Precomp,
+    faces: &[FaceKeyPoints],
+    p: &RetouchParams,
+) -> Cow<'a, ImgF32> {
+    apply_grade(pre, p, faces, cream_base(pre, faces, p))
+}
+
+/// 预设调色（见 `color::grade`）：黑点由原图统计；人物主体用人像 alpha（原图几何，所以要在形变之前），
+/// 去掉与人脸不相连的误检块（[`subject_weights`]）。没有调色时原样返回。
+fn apply_grade<'a>(
+    pre: &Precomp,
+    p: &RetouchParams,
+    faces: &[FaceKeyPoints],
+    img: Cow<'a, ImgF32>,
+) -> Cow<'a, ImgF32> {
+    let Some(g) = &p.grade else {
+        return img;
+    };
+    let t = std::time::Instant::now();
+    let black = g.black_point_of(&pre.orig);
+    let subject = pre.matte().filter(|_| g.adjusts_subject()).map(|m| {
+        let seeds: Vec<P> = faces.iter().map(|f| f.bbox.center()).collect();
+        let scale = if faces.is_empty() {
+            pre.orig.w.min(pre.orig.h) as f32 * 0.06
+        } else {
+            faces.iter().map(|f| f.scale_distance()).sum::<f32>() / faces.len() as f32
+        };
+        subject_weights(&m, &seeds, scale)
+    });
+    let mut out = img.into_owned();
+    g.apply(&mut out, black, subject.as_ref());
+    if std::env::var("RETOUCH_TIMING").is_ok() {
+        eprintln!(
+            "  [grade] black {black:.3}, {:.0} ms",
+            t.elapsed().as_secs_f64() * 1e3
+        );
+    }
+    Cow::Owned(out)
+}
+
 /// 奶油肌颈纹淡化的处理权重（全图，0..1；调试 / 可视化用）：与 [`retouch_with`] 相同的人脸选择、参数与底图。
 /// 皮肤遮罩与 AI 补丁用 `pre` 当前带的（见 `Engine::neck_weights`）。
 pub fn cream_neck_weights(pre: &Precomp, faces: &[FaceKeyPoints], p: &RetouchParams) -> GrayF32 {
@@ -475,8 +526,40 @@ pub fn cream_neck_weights(pre: &Precomp, faces: &[FaceKeyPoints], p: &RetouchPar
     let masks = pre.skin_masks(&faces_sel, p.body_skin);
     let params: Vec<&CreamParams> = faces_sel.iter().map(|f| p.cream_for(f.gender)).collect();
     let body_params = p.cream_female.as_ref().unwrap_or(&p.cream);
-    let base = cream_base(pre, faces, p);
+    let base = cream_input(pre, faces, p);
     skin::cream::neck_weights(&base, &masks, &faces_sel, &params, body_params)
+}
+
+/// 奶油肌牙齿美白的逐脸权重（`base` 为调色后、修图前的图，`strength` 为总强度）。
+fn cream_teeth(
+    base: &ImgF32,
+    faces_sel: &[FaceKeyPoints],
+    p: &RetouchParams,
+    strength: f32,
+) -> Vec<skin::teeth::TeethWeights> {
+    faces_sel
+        .iter()
+        .filter_map(|f| {
+            skin::teeth::teeth_weights(base, f, p.cream_for(f.gender).teeth_whiten * strength)
+        })
+        .collect()
+}
+
+/// 奶油肌牙齿美白的处理权重（全图，0..1；调试 / 可视化用）：与 [`retouch_with`] 相同的人脸选择、参数与底图。
+pub fn cream_teeth_weights(pre: &Precomp, faces: &[FaceKeyPoints], p: &RetouchParams) -> GrayF32 {
+    let mut all = GrayF32::new(pre.orig.w, pre.orig.h);
+    let strength = p.smooth.clamp(0.0, 1.0);
+    let faces_sel: Vec<FaceKeyPoints> = select_faces_indexed(faces)
+        .into_iter()
+        .map(|(_, f)| f.clone())
+        .collect();
+    if strength > 0.0 && !faces_sel.is_empty() {
+        let base = cream_input(pre, faces, p);
+        for tw in cream_teeth(&base, &faces_sel, p, strength) {
+            tw.max_into(&mut all);
+        }
+    }
+    all
 }
 
 /// 完整流水线（f32 输出）。
@@ -535,12 +618,13 @@ pub fn retouch_with(pre: &Precomp, faces: &[FaceKeyPoints], p: &RetouchParams) -
                 let params: Vec<&CreamParams> =
                     faces_sel.iter().map(|f| p.cream_for(f.gender)).collect();
                 let body_params = p.cream_female.as_ref().unwrap_or(&p.cream);
-                // AI 瑕疵祛除（先于经典流程；补丁只含被修改的像素）
-                let base = cream_base(pre, faces, p);
+                // AI 瑕疵祛除（先于经典流程；补丁只含被修改的像素）→ 预设调色 → 修图
+                let base = cream_input(pre, faces, p);
                 let mut o =
                     skin::cream::cream_skin(&base, &masks, &faces_sel, &params, body_params);
                 if strength < 1.0 {
-                    o = orig.zip_map(&o, |a, b| {
+                    let plain = apply_grade(pre, p, faces, Cow::Borrowed(orig));
+                    o = plain.zip_map(&o, |a, b| {
                         [
                             a[0] + (b[0] - a[0]) * strength,
                             a[1] + (b[1] - a[1]) * strength,
@@ -548,9 +632,13 @@ pub fn retouch_with(pre: &Precomp, faces: &[FaceKeyPoints], p: &RetouchParams) -
                         ]
                     });
                 }
+                // 牙齿美白（按性别的奶油肌参数，0 时不处理）：门限取调色后、修图前的颜色
+                for tw in cream_teeth(&base, &faces_sel, p, strength) {
+                    skin::teeth::whiten_teeth(&mut o, &tw);
+                }
                 o
             } else {
-                orig.clone()
+                apply_grade(pre, p, faces, Cow::Borrowed(orig)).into_owned()
             };
             post_tone(&mut out, p);
             out
@@ -570,7 +658,12 @@ pub fn retouch_with(pre: &Precomp, faces: &[FaceKeyPoints], p: &RetouchParams) -
         }
     }
 
-    // 4. 形变
+    // 4. 预设调色：奶油肌已在修图之前做过；其余磨皮模式的预计算都取自原图，只能在磨皮之后做
+    if p.smooth_mode != SmoothMode::Cream {
+        img = apply_grade(pre, p, faces, Cow::Owned(img)).into_owned();
+    }
+
+    // 5. 形变
     if !selected.is_empty() && p.has_warp() {
         let warps: Vec<FaceWarp> = selected
             .iter()
@@ -586,7 +679,7 @@ pub fn retouch_with(pre: &Precomp, faces: &[FaceKeyPoints], p: &RetouchParams) -
         }
     }
 
-    // 5. 风格
+    // 6. 风格
     match (&p.style, p.style_intensity) {
         (Some(StyleFilter::Lookup512(l)), k) if k > 0.0 => apply_lookup512(&mut img, l, k.min(1.0)),
         (Some(StyleFilter::Cube(l)), k) if k > 0.0 => apply_lut3d(&mut img, l, k.min(1.0)),
